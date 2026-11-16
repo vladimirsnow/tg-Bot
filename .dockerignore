@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+cookies/
+*cookies*.txt
+.venv/
+__pycache__/
+*.py[cod]
