@@ -1,9 +1,12 @@
 import asyncio
 import logging
+import os
 import shutil
+import threading
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Awaitable, Callable
@@ -18,6 +21,31 @@ from media import Attachment, MediaError, Post, download_post, download_track
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path not in ("/", "/health"):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def start_health_server() -> ThreadingHTTPServer | None:
+    port = os.environ.get("PORT")
+    if not port:
+        return None
+    server = ThreadingHTTPServer(("0.0.0.0", int(port)), HealthHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, name="health-server", daemon=True).start()
+    LOG.info("HTTP health-check слушает порт %s", port)
+    return server
 
 
 @dataclass(frozen=True)
@@ -231,7 +259,13 @@ def main() -> None:
                .post_init(bot.start).post_stop(bot.stop).build())
         app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive))
         app.add_error_handler(error_handler)
-        app.run_polling(allowed_updates=["message"], timeout=25)
+        health_server = start_health_server()
+        try:
+            app.run_polling(allowed_updates=["message"], timeout=25)
+        finally:
+            if health_server:
+                health_server.shutdown()
+                health_server.server_close()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     except InvalidToken:
