@@ -1,9 +1,12 @@
 import asyncio
 import json
+import hashlib
+import hmac
 import logging
 import os
 import shutil
 import threading
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -17,21 +20,52 @@ from telegram import ReplyParameters, Update
 from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-from links import Link, links_in, music_query
+from links import Link, links_in, music_query, parse_link
 from media import (Attachment, MediaError, Post, download_post, download_track,
                    download_track_local, error_detail, materialize_remote, recover_post, load_post)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.3"
+BUILD = "2026.11.17.4"
 
 
 class HealthHandler(BaseHTTPRequestHandler):
     application: Application | None = None
+    media_bot = None
+    loop = None
+    probe_future = None
+    probe_result = "not_run"
+    probe_lock = threading.Lock()
+
+    def do_POST(self) -> None:
+        worker = self.media_bot
+        if self.path != "/selftest" or worker is None:
+            self.send_error(404)
+            return
+        stamp = self.headers.get("X-Bot-Probe-Time", "")
+        signature = self.headers.get("X-Bot-Probe-Signature", "")
+        expected = hmac.new(worker.settings.token.encode(), stamp.encode(), hashlib.sha256).hexdigest()
+        valid_time = stamp.isdecimal() and len(stamp) <= 12 and abs(time.time() - int(stamp)) <= 60
+        if not valid_time or not hmac.compare_digest(expected, signature):
+            self.send_error(403)
+            return
+        if not self.application or not self.application.running or not worker.settings.owner_user_id:
+            self.send_error(503)
+            return
+        with self.probe_lock:
+            if HealthHandler.probe_future and not HealthHandler.probe_future.done():
+                self.send_error(409)
+                return
+            HealthHandler.probe_result = "running"
+            HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(), self.loop)
+        self.send_response(202)
+        self.end_headers()
+        self.wfile.write(b"started\n")
 
     def do_GET(self) -> None:
         if self.path == "/status":
             payload = json.dumps({"build": BUILD,
+                                  "selftest": HealthHandler.probe_result,
                                   "application_running": bool(self.application and self.application.running)})
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -79,6 +113,8 @@ class MediaBot:
         self.username = ""
 
     async def start(self, app: Application) -> None:
+        HealthHandler.media_bot = self
+        HealthHandler.loop = asyncio.get_running_loop()
         self.username = app.bot.username
         self.trigger = self.trigger or f"@{self.username}"
         self.worker = asyncio.create_task(self.work(app.bot))
@@ -91,6 +127,9 @@ class MediaBot:
             LOG.info("Для настройки доступа в личке отправь боту /start и возьми ID из журнала.")
 
     async def stop(self, _: Application) -> None:
+        probe = HealthHandler.probe_future
+        if probe and not probe.done():
+            probe.cancel()
         workers = [worker for worker in (self.worker, self.music_worker) if worker]
         for worker in workers:
             worker.cancel()
@@ -154,7 +193,18 @@ class MediaBot:
             finally:
                 queue.task_done()
 
-    async def process(self, bot: Bot, job: Job) -> None:
+    async def selftest(self) -> None:
+        try:
+            bot = HealthHandler.application.bot
+            message = await bot.send_message(chat_id=self.settings.owner_user_id,
+                                            text="Проверка TikTok с сервера Render: отправляю тестовый ролик.")
+            success = await self.process(bot, Job(message, link=parse_link("https://vt.tiktok.com/ZSpGEBawN/")))
+            HealthHandler.probe_result = "delivered" if success else "failed"
+        except Exception as exc:
+            LOG.warning("Проверка Render / %s", error_detail(exc))
+            HealthHandler.probe_result = "failed"
+
+    async def process(self, bot: Bot, job: Job) -> bool:
         with TemporaryDirectory(prefix="telegram-media-") as temporary:
             directory = Path(temporary)
             started = asyncio.get_running_loop().time()
@@ -181,11 +231,11 @@ class MediaBot:
             except (MediaError, OSError, ValueError) as exc:
                 LOG.info("%s / %s", type(source).__name__, error_detail(exc))
                 await self.finish_status(bot, job.message, status, failure)
-                return
+                return False
             except Exception as exc:
                 LOG.warning("%s / ошибка источника: %s", type(source).__name__, type(exc).__name__)
                 await self.finish_status(bot, job.message, status, failure)
-                return
+                return False
             LOG.info("%s / источник подготовлен за %.1f с", label, asyncio.get_running_loop().time() - started)
             try:
                 await self.edit_status(status, "⏳ Передаю медиа в Telegram…")
@@ -215,13 +265,14 @@ class MediaBot:
                     LOG.warning("%s / отправка: %s; резервный путь: %s", label,
                                 error_detail(exc), error_detail(fallback_exc))
                     await self.finish_status(bot, job.message, status, failure)
-                    return
+                    return False
             LOG.info("%s / готово за %.1f с", label, asyncio.get_running_loop().time() - started)
             if status:
                 try:
                     await status.delete()
                 except TelegramError:
                     pass
+            return True
 
     async def edit_status(self, status: Message | None, text: str) -> None:
         if status:

@@ -1,15 +1,17 @@
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 import httpx
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telegram.error import BadRequest
 
-from bot import Job, MediaBot
+from bot import Job, MediaBot, HealthHandler
 from links import parse_link
 from media import Attachment, MediaError, Post, gallery, recover_post, load_post, download_post, Remote
 from settings import Settings
@@ -19,6 +21,19 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_remote_probe_rejects_unsigned_requests(self):
+        with patch.object(HealthHandler, "media_bot", SimpleNamespace(settings=SETTINGS)):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                response = httpx.post(f"http://127.0.0.1:{server.server_port}/selftest")
+                self.assertEqual(response.status_code, 403)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
     def test_extraction_failure_also_starts_recovery(self):
         link = parse_link("https://vt.tiktok.com/ZSpGEBawN/")
         expected = Post([Attachment("video", Path("/tmp/video.mp4"))])
