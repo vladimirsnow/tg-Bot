@@ -27,6 +27,7 @@ CDNS = {
                "tiktokv.com", "tiktokv.us", "tiktokv.eu", "tiktokwm.com", "tikwm.com",
                "byteoversea.com", "ibytedtos.com", "muscdn.com", "snssdk.com"),
     "twitter": ("twimg.com",),
+    "youtube": ("googlevideo.com", "googleusercontent.com"),
     "audius": ("audius.co", "r2.cloudflarestorage.com"),
 }
 
@@ -38,12 +39,15 @@ class MediaError(Exception):
 @dataclass
 class Attachment:
     kind: str
-    path: Path
+    path: Path | None
     title: str = ""
     artist: str = ""
     width: int | None = None
     height: int | None = None
     duration: int | None = None
+    remote_url: str | None = None
+    platform: str | None = None
+    referer: str = ""
 
 
 @dataclass
@@ -299,7 +303,20 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False) 
     return as_video(source, directory / "video.mp4")
 
 
-def download_items(client: httpx.Client, platform: str, items: list[Remote], directory: Path) -> Post:
+def youtube_remote(url: str, cookies: Path | None) -> Attachment:
+    args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--no-playlist", "--no-warnings",
+            "--quiet", "--socket-timeout", "8", "--retries", "0", "--extractor-retries", "0",
+            "--format", "b[height<=720][ext=mp4]", "--get-url"]
+    if cookies:
+        args += ["--cookies", str(cookies)]
+    output = run([*args, "--", url], 30)
+    media_url = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
+    if not media_url or not cdn_url(media_url, "youtube"):
+        raise MediaError("YouTube не выдал прямой MP4")
+    return Attachment("video", None, remote_url=media_url, platform="youtube", referer=url)
+
+
+def download_items(platform: str, items: list[Remote], referer: str) -> Post:
     result = Post()
     seen = set()
     photos = 0
@@ -313,26 +330,46 @@ def download_items(client: httpx.Client, platform: str, items: list[Remote], dir
             if photos > MAX_PHOTOS:
                 result.incomplete = True
                 continue
-        raw = directory / f"source-{index}"
-        try:
-            fetch(client, item.url, platform, raw, 15 * MIB if item.kind == "photo" else SOURCE_LIMIT)
-            if item.kind == "photo":
-                result.visual.append(as_photo(raw, directory / f"photo-{index}.jpg"))
-            elif item.kind == "video":
-                result.visual.append(as_video(raw, directory / f"video-{index}.mp4"))
-            else:
-                result.audio.append(as_audio(raw, directory / f"audio-{index}.mp3", item.title, item.artist))
-        except (MediaError, httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as exc:
-            LOG.info("%s %s: %s", platform, item.kind, type(exc).__name__)
+        if item.kind not in {"photo", "video", "audio"} or not cdn_url(item.url, platform):
             result.incomplete = True
-        finally:
-            raw.unlink(missing_ok=True)
+            continue
+        attachment = Attachment(item.kind, None, title=item.title, artist=item.artist,
+                                remote_url=item.url, platform=platform, referer=referer)
+        (result.audio if item.kind == "audio" else result.visual).append(attachment)
     return result
+
+
+def materialize_remote(attachment: Attachment, directory: Path, index: int = 0) -> Attachment:
+    if not attachment.remote_url or not attachment.platform:
+        raise MediaError("Удалённый файл недоступен")
+    raw = directory / f"remote-source-{index}"
+    extension = {"photo": "photo.jpg", "video": "video.mp4", "audio": "audio.mp3"}[attachment.kind]
+    target = directory / f"remote-{index}-{extension}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if attachment.referer:
+        headers["Referer"] = attachment.referer
+    with httpx.Client(timeout=12, headers=headers) as client:
+        limit = 15 * MIB if attachment.kind == "photo" else SOURCE_LIMIT
+        fetch(client, attachment.remote_url, attachment.platform, raw, limit)
+    try:
+        if attachment.kind == "photo":
+            return as_photo(raw, target)
+        if attachment.kind == "video":
+            return as_video(raw, target)
+        return as_audio(raw, target, attachment.title, attachment.artist)
+    finally:
+        raw.unlink(missing_ok=True)
 
 
 def download_post(link: Link, directory: Path, settings: Settings) -> Post:
     cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
     photo_fallback = None
+    if link.platform == "youtube":
+        try:
+            return Post([youtube_remote(link.url, cookies)])
+        except MediaError as exc:
+            LOG.info("YouTube / быстрый MP4: %s", str(exc))
+            return Post([ytdlp(link.url, directory, cookies)])
     with httpx.Client(timeout=12, headers={"User-Agent": "Mozilla/5.0", "Referer": link.url}) as client:
         if link.platform == "instagram" and not link.post_id:
             for _ in range(4):
@@ -347,8 +384,8 @@ def download_post(link: Link, directory: Path, settings: Settings) -> Post:
             if not link.post_id:
                 raise MediaError("Не удалось раскрыть короткую ссылку Instagram")
         providers = {
-            "instagram": [lambda: gallery(link, cookies), lambda: instagram_embed(client, link)],
-            "tiktok": [lambda: gallery(link, None), lambda: tikwm(client, link)],
+            "instagram": [lambda: instagram_embed(client, link), lambda: gallery(link, cookies)],
+            "tiktok": [lambda: tikwm(client, link), lambda: gallery(link, None)],
             "twitter": [lambda: twitter(client, link)],
             "youtube": [],
         }
@@ -357,7 +394,7 @@ def download_post(link: Link, directory: Path, settings: Settings) -> Post:
             target.mkdir()
             try:
                 items = provider()
-                post = download_items(client, link.platform, items, target)
+                post = download_items(link.platform, items, link.url)
                 if not post.visual:
                     continue
                 photos = [item for item in post.visual if item.kind == "photo"]

@@ -13,11 +13,11 @@ from typing import Awaitable, Callable
 
 from telegram import Bot, Chat, InputFile, InputMediaPhoto, InputMediaVideo, Message, MessageEntity
 from telegram import ReplyParameters, Update
-from telegram.error import Conflict, InvalidToken, RetryAfter, TelegramError
+from telegram.error import BadRequest, Conflict, InvalidToken, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from links import Link, links_in, music_query
-from media import Attachment, MediaError, Post, download_post, download_track
+from media import Attachment, MediaError, Post, download_post, download_track, materialize_remote
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -159,9 +159,9 @@ class MediaBot:
                 await self.say(bot, job.message, failure)
                 return
             if isinstance(result, Attachment):
-                await self.send_single(bot, job.message, result)
+                await self.send_single(bot, job.message, result, directory)
             else:
-                await self.send_post(bot, job.message, result)
+                await self.send_post(bot, job.message, result, directory)
 
     async def load(self, loader, source, directory):
         # Keep the temporary files in place while a download finishes during shutdown.
@@ -192,8 +192,29 @@ class MediaBot:
     async def say(self, bot: Bot, message: Message, content: str) -> None:
         await self.send(lambda: bot.send_message(**self.destination(message), text=content))
 
-    async def send_single(self, bot: Bot, message: Message, attachment: Attachment) -> None:
+    async def send_single(self, bot: Bot, message: Message, attachment: Attachment,
+                          directory: Path | None = None) -> None:
+        if attachment.remote_url:
+            destination = self.destination(message)
+            try:
+                if attachment.kind == "video":
+                    await self.send(lambda: bot.send_video(**destination, video=attachment.remote_url,
+                                         supports_streaming=True, read_timeout=60))
+                elif attachment.kind == "photo":
+                    await self.send(lambda: bot.send_photo(**destination, photo=attachment.remote_url,
+                                         read_timeout=60))
+                else:
+                    await self.send(lambda: bot.send_audio(**destination, audio=attachment.remote_url,
+                                         title=attachment.title, performer=attachment.artist or None,
+                                         read_timeout=60))
+                return
+            except BadRequest:
+                if directory is None:
+                    raise
+                attachment = await asyncio.to_thread(materialize_remote, attachment, directory)
         async def upload():
+            if attachment.path is None:
+                raise MediaError("Файл медиа отсутствует")
             with attachment.path.open("rb") as handle:
                 file = InputFile(handle, filename=attachment.path.name, read_file_handle=False)
                 destination = self.destination(message)
@@ -208,23 +229,44 @@ class MediaBot:
                                          performer=attachment.artist or None, write_timeout=120)
         await self.send(upload)
 
-    async def send_post(self, bot: Bot, message: Message, post: Post) -> None:
+    async def send_post(self, bot: Bot, message: Message, post: Post, directory: Path) -> None:
         for start in range(0, len(post.visual), 10):
             group = post.visual[start:start + 10]
             if len(group) == 1:
-                await self.send_single(bot, message, group[0])
+                await self.send_single(bot, message, group[0], directory)
             else:
-                await self.send_album(bot, message, group)
+                await self.send_album(bot, message, group, directory)
         for attachment in post.audio:
-            await self.send_single(bot, message, attachment)
+            await self.send_single(bot, message, attachment, directory)
         if post.incomplete:
             await self.say(bot, message, "Часть медиа в этом посте недоступна или превышает лимит.")
 
-    async def send_album(self, bot: Bot, message: Message, group: list[Attachment]) -> None:
+    async def send_album(self, bot: Bot, message: Message, group: list[Attachment],
+                         directory: Path | None = None) -> None:
+        if all(item.remote_url for item in group):
+            media = []
+            for item in group:
+                if item.kind == "video":
+                    media.append(InputMediaVideo(item.remote_url, supports_streaming=True,
+                                                 width=item.width, height=item.height,
+                                                 duration=item.duration))
+                else:
+                    media.append(InputMediaPhoto(item.remote_url))
+            try:
+                await self.send(lambda: bot.send_media_group(**self.destination(message), media=media,
+                                                             read_timeout=60))
+                return
+            except BadRequest:
+                if directory is None:
+                    raise
+                group = [await asyncio.to_thread(materialize_remote, item, directory, index)
+                         for index, item in enumerate(group)]
         async def upload():
             with ExitStack() as stack:
                 album = []
                 for item in group:
+                    if item.path is None:
+                        raise MediaError("Файл медиа отсутствует")
                     handle = stack.enter_context(item.path.open("rb"))
                     file = InputFile(handle, filename=item.path.name, attach=True, read_file_handle=False)
                     if item.kind == "video":
