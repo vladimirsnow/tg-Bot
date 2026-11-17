@@ -483,6 +483,12 @@ def load_post(link: Link, directory: Path, settings: Settings) -> Post:
     try:
         return download_post(link, directory, settings)
     except (MediaError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
+        if link.platform == "youtube":
+            # Repeating the same client and IP immediately amplifies rate limits.
+            if any(reason in str(exc) for reason in ("Failed to extract any player response", "HTTP Error 403",
+                                                     "HTTP Error 429", "not a bot", "Sign in")):
+                raise MediaError("YouTube не разрешил загрузку с этого сервера. Нужны cookies аккаунта или другой адрес сервера.") from None
+            raise
         LOG.warning("%s / первый путь: %s; запускаю резервный", link.platform, error_detail(exc))
         return recover_post(link, directory / "extraction-recovery", settings)
 

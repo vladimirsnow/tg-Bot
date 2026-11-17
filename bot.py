@@ -27,7 +27,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.14"
+BUILD = "2026.11.17.15"
 
 
 class ProbeLog(logging.Handler):
@@ -289,6 +289,8 @@ class MediaBot:
                 result = await self.load(loader, source, directory)
             except (MediaError, OSError, ValueError) as exc:
                 LOG.info("%s / %s", type(source).__name__, error_detail(exc))
+                if job.link and job.link.platform == "youtube" and str(exc).startswith("YouTube не разрешил"):
+                    failure = str(exc)
                 await self.finish_status(bot, job.message, status, failure)
                 return False
             except Exception as exc:

@@ -13,7 +13,7 @@ from telegram.error import BadRequest
 
 from bot import Job, MediaBot, HealthHandler
 from links import parse_link
-from media import Attachment, MediaError, Post, gallery, recover_post, load_post, download_post, Remote
+from media import Attachment, MediaError, Post, gallery, recover_post, load_post, download_post, Remote, ytdlp
 from settings import Settings
 
 
@@ -21,6 +21,26 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_tiktok_prefers_h264_even_for_tall_portrait_videos(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "download.mp4"
+            source.write_bytes(b"video")
+            with patch("downloader.extract", return_value={}) as backend, \
+                 patch("media.as_video", return_value=Attachment("video", source)):
+                ytdlp("https://vt.tiktok.com/ZSpGEBawN/", root, None)
+                selected = backend.call_args.args[1]["format"]
+                self.assertTrue(selected.startswith("b[vcodec=h264]"))
+                self.assertNotIn("height<=", selected)
+
+    def test_blocked_youtube_does_not_repeat_identical_requests(self):
+        link = parse_link("https://youtube.com/shorts/v2M26i19fvI")
+        with patch("media.download_post", side_effect=MediaError("HTTP Error 429")), \
+             patch("media.recover_post") as recovery:
+            with self.assertRaisesRegex(MediaError, "YouTube не разрешил"):
+                load_post(link, Path("/tmp"), SETTINGS)
+            recovery.assert_not_called()
+
     def test_remote_probe_rejects_unsigned_requests(self):
         with patch.object(HealthHandler, "media_bot", SimpleNamespace(settings=SETTINGS)):
             server = ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
