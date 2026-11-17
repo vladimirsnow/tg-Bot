@@ -61,6 +61,7 @@ class Attachment:
     platform: str | None = None
     referer: str = ""
     native_info: dict | None = None
+    file_id: str | None = None
 
 
 @dataclass

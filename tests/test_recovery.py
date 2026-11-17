@@ -139,6 +139,19 @@ class RecoveryTests(unittest.TestCase):
 
 
 class SenderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_video_does_not_download_again(self):
+        worker = MediaBot(SETTINGS)
+        link = parse_link("https://youtube.com/shorts/v2M26i19fvI")
+        cached = Attachment("video", None, file_id="telegram-file-id")
+        worker.media_cache[link.url] = cached
+        worker.send_single = AsyncMock()
+        worker.load = AsyncMock()
+        message = SimpleNamespace()
+        api = SimpleNamespace()
+        self.assertTrue(await worker.process(api, Job(message, link=link)))
+        worker.send_single.assert_awaited_once_with(api, message, cached)
+        worker.load.assert_not_awaited()
+
     async def test_one_bad_album_file_does_not_hide_other_photos(self):
         worker = MediaBot(SETTINGS)
         api = SimpleNamespace(send_media_group=AsyncMock(side_effect=BadRequest("CDN failed")))

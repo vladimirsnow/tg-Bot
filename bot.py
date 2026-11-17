@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 from contextlib import ExitStack
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.17"
+BUILD = "2026.11.17.18"
 
 
 class ProbeLog(logging.Handler):
@@ -184,6 +185,7 @@ class MediaBot:
         self.music_worker: asyncio.Task | None = None
         self.trigger = settings.trigger
         self.username = ""
+        self.media_cache = OrderedDict()
 
     async def start(self, app: Application) -> None:
         from downloader import warmup
@@ -289,10 +291,21 @@ class MediaBot:
             HealthHandler.probe_logs = trace.lines
 
     async def process(self, bot: Bot, job: Job) -> bool:
+        cache_key = job.link.url if job.link else "track:" + (job.track or "").strip().casefold()
+        cached = self.media_cache.get(cache_key)
+        if cached:
+            try:
+                await self.send_single(bot, job.message, cached)
+                self.media_cache.move_to_end(cache_key)
+                LOG.info("Telegram / повторная отправка из кэша")
+                return True
+            except TelegramError:
+                self.media_cache.pop(cache_key, None)
         with TemporaryDirectory(prefix="telegram-media-") as temporary:
             directory = Path(temporary)
             started = asyncio.get_running_loop().time()
             status = None
+            delivered = None
             if job.link:
                 name = {"instagram": "Instagram", "tiktok": "TikTok", "youtube": "YouTube",
                         "twitter": "X / Twitter"}[job.link.platform]
@@ -326,7 +339,10 @@ class MediaBot:
             try:
                 await self.edit_status(status, "⏳ Передаю медиа в Telegram…")
                 if isinstance(result, Attachment):
-                    await self.send_single(bot, job.message, result, directory)
+                    delivered = await self.send_single(bot, job.message, result, directory)
+                elif (len(result.visual) == 1 and not result.audio and not result.audio_source
+                      and not result.incomplete):
+                    delivered = await self.send_single(bot, job.message, result.visual[0], directory)
                 else:
                     await self.send_post(bot, job.message, result, directory)
             except Exception as exc:
@@ -339,12 +355,15 @@ class MediaBot:
                         LOG.info("%s / резервная загрузка", label)
                         await self.edit_status(status, "⏳ Прямая ссылка не подошла, загружаю резервным способом…")
                         local = await self.load(download_track_local, job.track, directory)
-                        await self.send_single(bot, job.message, local, directory)
+                        delivered = await self.send_single(bot, job.message, local, directory)
                     elif job.link and simple_post:
                         LOG.info("%s / резервная обработка", label)
                         await self.edit_status(status, "⏳ Прямая ссылка не подошла, обрабатываю видео…")
                         local = await self.load(recover_post, job.link, directory / "recovery")
-                        await self.send_post(bot, job.message, local, directory)
+                        if len(local.visual) == 1 and not local.audio and not local.incomplete:
+                            delivered = await self.send_single(bot, job.message, local.visual[0], directory)
+                        else:
+                            await self.send_post(bot, job.message, local, directory)
                     else:
                         raise exc
                 except Exception as fallback_exc:
@@ -353,6 +372,21 @@ class MediaBot:
                     await self.finish_status(bot, job.message, status, failure)
                     return False
             LOG.info("%s / готово за %.1f с", label, asyncio.get_running_loop().time() - started)
+            if delivered:
+                item = None
+                if delivered.video:
+                    video = delivered.video
+                    item = Attachment("video", None, width=video.width, height=video.height,
+                                      duration=video.duration, file_id=video.file_id)
+                elif delivered.audio:
+                    audio = delivered.audio
+                    item = Attachment("audio", None, title=audio.title or "Аудио", artist=audio.performer or "",
+                                      file_id=audio.file_id)
+                if item:
+                    self.media_cache[cache_key] = item
+                    self.media_cache.move_to_end(cache_key)
+                    while len(self.media_cache) > 128:
+                        self.media_cache.popitem(last=False)
             if status:
                 try:
                     await status.delete()
@@ -409,24 +443,25 @@ class MediaBot:
         await self.send(lambda: bot.send_message(**self.destination(message), text=content))
 
     async def send_single(self, bot: Bot, message: Message, attachment: Attachment,
-                          directory: Path | None = None) -> None:
-        if attachment.remote_url:
+                          directory: Path | None = None) -> Message:
+        if attachment.remote_url or attachment.file_id:
+            media = attachment.file_id or attachment.remote_url
             destination = self.destination(message)
             try:
                 if attachment.kind == "video":
-                    await self.send(lambda: bot.send_video(**destination, video=attachment.remote_url,
+                    sent = await self.send(lambda: bot.send_video(**destination, video=media,
                                          supports_streaming=True, read_timeout=60))
                 elif attachment.kind == "photo":
-                    await self.send(lambda: bot.send_photo(**destination, photo=attachment.remote_url,
+                    sent = await self.send(lambda: bot.send_photo(**destination, photo=media,
                                          read_timeout=60))
                 else:
-                    await self.send(lambda: bot.send_audio(**destination, audio=attachment.remote_url,
+                    sent = await self.send(lambda: bot.send_audio(**destination, audio=media,
                                          title=attachment.title, performer=attachment.artist or None,
                                          read_timeout=60))
                 LOG.info("Telegram / доставлен %s по прямой ссылке", attachment.kind)
-                return
+                return sent
             except (BadRequest, NetworkError) as exc:
-                if directory is None:
+                if directory is None or not attachment.remote_url:
                     raise
                 LOG.info("%s / прямая отправка отклонена: %s; загружаю файл", attachment.platform,
                          type(exc).__name__)
@@ -438,16 +473,17 @@ class MediaBot:
                 file = InputFile(handle, filename=attachment.path.name, read_file_handle=False)
                 destination = self.destination(message)
                 if attachment.kind == "video":
-                    await bot.send_video(**destination, video=file, supports_streaming=True,
+                    return await bot.send_video(**destination, video=file, supports_streaming=True,
                                          width=attachment.width, height=attachment.height,
                                          duration=attachment.duration, write_timeout=120)
                 elif attachment.kind == "photo":
-                    await bot.send_photo(**destination, photo=file, write_timeout=90)
+                    return await bot.send_photo(**destination, photo=file, write_timeout=90)
                 else:
-                    await bot.send_audio(**destination, audio=file, title=attachment.title,
+                    return await bot.send_audio(**destination, audio=file, title=attachment.title,
                                          performer=attachment.artist or None, write_timeout=120)
-        await self.send(upload)
+        sent = await self.send(upload)
         LOG.info("Telegram / доставлен %s загрузкой файла", attachment.kind)
+        return sent
 
     async def send_post(self, bot: Bot, message: Message, post: Post, directory: Path) -> None:
         incomplete = post.incomplete
