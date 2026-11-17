@@ -255,13 +255,13 @@ def main() -> None:
         if not shutil.which("deno"):
             LOG.warning("Deno не найден. YouTube может не работать. В Docker Deno уже включён.")
         bot = MediaBot(settings)
-        app = (ApplicationBuilder().token(settings.token).connect_timeout(15)
+        app = (ApplicationBuilder().token(settings.token).connect_timeout(20).read_timeout(30)
                .post_init(bot.start).post_stop(bot.stop).build())
         app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive))
         app.add_error_handler(error_handler)
         health_server = start_health_server()
         try:
-            app.run_polling(allowed_updates=["message"], timeout=25)
+            app.run_polling(allowed_updates=["message"], timeout=25, bootstrap_retries=-1)
         finally:
             if health_server:
                 health_server.shutdown()
