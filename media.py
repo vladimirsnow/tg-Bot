@@ -459,6 +459,13 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
             target = directory / f"provider-{index}"
             target.mkdir(exist_ok=True)
             try:
+                if fast and link.platform == "tiktok" and index == 1 and not link.is_photo:
+                    native = directory / "tiktok-native"
+                    native.mkdir(exist_ok=True)
+                    try:
+                        return Post([ytdlp(link.url, native, None, timeout=45)])
+                    except (MediaError, OSError, ValueError) as exc:
+                        LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 provider_started = time.monotonic()
                 items = provider()
                 LOG.info("%s / источник %s вернул %s файлов за %.1f с", link.platform, index + 1,
@@ -467,16 +474,6 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                 post = download_items(client, link.platform, items, target, link.url, fast)
                 if not post.visual:
                     continue
-                if (fast and link.platform == "tiktok" and index == 1
-                        and len(post.visual) == 1 and post.visual[0].kind == "video"):
-                    # TikTok CDN links often require the extractor's headers and
-                    # cookies, which Telegram's remote fetch cannot provide.
-                    native = directory / "tiktok-native"
-                    native.mkdir(exist_ok=True)
-                    try:
-                        return Post([ytdlp(link.url, native, None, timeout=45)])
-                    except (MediaError, OSError, ValueError) as exc:
-                        LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 photos = [item for item in post.visual if item.kind == "photo"]
                 if photo_fallback and not photos:
                     continue

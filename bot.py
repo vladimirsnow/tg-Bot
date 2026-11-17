@@ -27,7 +27,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.6"
+BUILD = "2026.11.17.7"
 
 
 class ProbeLog(logging.Handler):
