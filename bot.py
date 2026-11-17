@@ -13,11 +13,12 @@ from typing import Awaitable, Callable
 
 from telegram import Bot, Chat, InputFile, InputMediaPhoto, InputMediaVideo, Message, MessageEntity
 from telegram import ReplyParameters, Update
-from telegram.error import BadRequest, Conflict, InvalidToken, RetryAfter, TelegramError
+from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from links import Link, links_in, music_query
-from media import Attachment, MediaError, Post, download_post, download_track, materialize_remote
+from media import (Attachment, MediaError, Post, download_post, download_track,
+                   download_track_local, materialize_remote)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -138,30 +139,92 @@ class MediaBot:
     async def process(self, bot: Bot, job: Job) -> None:
         with TemporaryDirectory(prefix="telegram-media-") as temporary:
             directory = Path(temporary)
+            started = asyncio.get_running_loop().time()
+            status = None
             if job.link:
                 name = {"instagram": "Instagram", "tiktok": "TikTok", "youtube": "YouTube",
                         "twitter": "X / Twitter"}[job.link.platform]
+                label = name
                 failure = f"Не удалось получить медиа из {name}. Возможно, пост удалён, закрыт или сайт ограничил доступ."
                 loader = download_post
                 source = job.link
             else:
+                label = "Поиск трека"
                 failure = "Не удалось найти доступный трек. Попробуй указать исполнителя и название."
                 loader = download_track
                 source = job.track
             try:
+                status = await self.send(lambda: bot.send_message(
+                    **self.destination(job.message), text="⏳ Получаю медиа…"))
+            except TelegramError:
+                pass
+            try:
                 result = await self.load(loader, source, directory)
             except (MediaError, OSError, ValueError) as exc:
                 LOG.info("%s / %s", type(source).__name__, str(exc) if isinstance(exc, MediaError) else type(exc).__name__)
-                await self.say(bot, job.message, failure)
+                await self.finish_status(bot, job.message, status, failure)
                 return
             except Exception as exc:
                 LOG.warning("%s / ошибка источника: %s", type(source).__name__, type(exc).__name__)
-                await self.say(bot, job.message, failure)
+                await self.finish_status(bot, job.message, status, failure)
                 return
-            if isinstance(result, Attachment):
-                await self.send_single(bot, job.message, result, directory)
-            else:
-                await self.send_post(bot, job.message, result, directory)
+            LOG.info("%s / источник подготовлен за %.1f с", label, asyncio.get_running_loop().time() - started)
+            try:
+                await self.edit_status(status, "⏳ Передаю медиа в Telegram…")
+                if isinstance(result, Attachment):
+                    await self.send_single(bot, job.message, result, directory)
+                else:
+                    await self.send_post(bot, job.message, result, directory)
+            except Exception as exc:
+                remote = (isinstance(result, Attachment) and result.remote_url)
+                simple_post = (isinstance(result, Post) and result.visual and not result.audio
+                               and len(result.visual) <= 10
+                               and any(item.remote_url for item in result.visual))
+                try:
+                    if job.track and remote:
+                        LOG.info("%s / резервная загрузка", label)
+                        await self.edit_status(status, "⏳ Прямая ссылка не подошла, загружаю резервным способом…")
+                        local = await self.load(download_track_local, job.track, directory)
+                        await self.send_single(bot, job.message, local, directory)
+                    elif job.link and simple_post:
+                        LOG.info("%s / резервная обработка", label)
+                        await self.edit_status(status, "⏳ Прямая ссылка не подошла, обрабатываю видео…")
+                        local = await self.load(
+                            lambda link, path, settings: download_post(link, path, settings, fast=False),
+                            job.link, directory)
+                        await self.send_post(bot, job.message, local, directory)
+                    else:
+                        raise exc
+                except Exception as fallback_exc:
+                    LOG.warning("%s / отправка: %s; резервный путь: %s", label,
+                                type(exc).__name__, type(fallback_exc).__name__)
+                    await self.finish_status(bot, job.message, status, failure)
+                    return
+            LOG.info("%s / готово за %.1f с", label, asyncio.get_running_loop().time() - started)
+            if status:
+                try:
+                    await status.delete()
+                except TelegramError:
+                    pass
+
+    async def edit_status(self, status: Message | None, text: str) -> None:
+        if status:
+            try:
+                await status.edit_text(text)
+            except TelegramError:
+                pass
+
+    async def finish_status(self, bot: Bot, message: Message, status: Message | None, text: str) -> None:
+        if status:
+            try:
+                await status.edit_text(text)
+                return
+            except TelegramError:
+                pass
+        try:
+            await self.say(bot, message, text)
+        except TelegramError:
+            pass
 
     async def load(self, loader, source, directory):
         # Keep the temporary files in place while a download finishes during shutdown.
@@ -208,9 +271,11 @@ class MediaBot:
                                          title=attachment.title, performer=attachment.artist or None,
                                          read_timeout=60))
                 return
-            except BadRequest:
+            except (BadRequest, NetworkError) as exc:
                 if directory is None:
                     raise
+                LOG.info("%s / прямая отправка отклонена: %s; загружаю файл", attachment.platform,
+                         type(exc).__name__)
                 attachment = await asyncio.to_thread(materialize_remote, attachment, directory)
         async def upload():
             if attachment.path is None:
@@ -256,9 +321,10 @@ class MediaBot:
                 await self.send(lambda: bot.send_media_group(**self.destination(message), media=media,
                                                              read_timeout=60))
                 return
-            except BadRequest:
+            except (BadRequest, NetworkError) as exc:
                 if directory is None:
                     raise
+                LOG.info("Альбом / прямая отправка отклонена: %s; загружаю файлы", type(exc).__name__)
                 group = [await asyncio.to_thread(materialize_remote, item, directory, index)
                          for index, item in enumerate(group)]
         async def upload():

@@ -28,6 +28,7 @@ CDNS = {
                "byteoversea.com", "ibytedtos.com", "muscdn.com", "snssdk.com"),
     "twitter": ("twimg.com",),
     "youtube": ("googlevideo.com", "googleusercontent.com"),
+    "soundcloud": ("sndcdn.com", "soundcloud.com", "soundcloud.cloud"),
     "audius": ("audius.co", "r2.cloudflarestorage.com"),
 }
 
@@ -291,7 +292,11 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False) 
                  "--print", "after_move:[%(title)j,%(artist,creator,uploader)j]"]
     else:
         args += ["--match-filters", "!is_live & duration <=? 900", "--merge-output-format", "mp4",
-                 "--format", "bv*[height<=1280][ext=mp4]+ba[ext=m4a]/b[height<=1280][ext=mp4]/b[ext=mp4]/b[height<=1280]/b"]
+                 "--format", "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
+                          "bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+                          "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
+                          "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+                          "b[ext=mp4]/b[height<=720]/b"]
     output = run([*args, "--", url], 145)
     source = next((path for path in directory.glob("download.*") if path.is_file()
                    and path.suffix.lower() in {".mp4", ".m4a", ".mp3", ".webm", ".ogg", ".opus", ".mkv", ".aac"}), None)
@@ -305,18 +310,20 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False) 
 
 def youtube_remote(url: str, cookies: Path | None) -> Attachment:
     args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--no-playlist", "--no-warnings",
-            "--quiet", "--socket-timeout", "8", "--retries", "0", "--extractor-retries", "0",
-            "--format", "b[height<=720][ext=mp4]", "--get-url"]
+            "--quiet", "--use-extractors", "default,-generic", "--compat-options", "no-certifi",
+            "--socket-timeout", "5", "--retries", "0", "--extractor-retries", "0",
+            "--format", "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]", "--get-url"]
     if cookies:
         args += ["--cookies", str(cookies)]
-    output = run([*args, "--", url], 30)
+    output = run([*args, "--", url], 12)
     media_url = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
     if not media_url or not cdn_url(media_url, "youtube"):
         raise MediaError("YouTube не выдал прямой MP4")
     return Attachment("video", None, remote_url=media_url, platform="youtube", referer=url)
 
 
-def download_items(platform: str, items: list[Remote], referer: str) -> Post:
+def download_items(client: httpx.Client, platform: str, items: list[Remote], directory: Path,
+                   referer: str, fast: bool) -> Post:
     result = Post()
     seen = set()
     photos = 0
@@ -332,6 +339,24 @@ def download_items(platform: str, items: list[Remote], referer: str) -> Post:
                 continue
         if item.kind not in {"photo", "video", "audio"} or not cdn_url(item.url, platform):
             result.incomplete = True
+            continue
+        if not fast:
+            raw = directory / f"source-{index}"
+            try:
+                fetch(client, item.url, platform, raw,
+                      15 * MIB if item.kind == "photo" else SOURCE_LIMIT)
+                if item.kind == "photo":
+                    attachment = as_photo(raw, directory / f"photo-{index}.jpg")
+                elif item.kind == "video":
+                    attachment = as_video(raw, directory / f"video-{index}.mp4")
+                else:
+                    attachment = as_audio(raw, directory / f"audio-{index}.mp3", item.title, item.artist)
+                (result.audio if item.kind == "audio" else result.visual).append(attachment)
+            except (MediaError, httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as exc:
+                LOG.info("%s %s / загрузка: %s", platform, item.kind, type(exc).__name__)
+                result.incomplete = True
+            finally:
+                raw.unlink(missing_ok=True)
             continue
         attachment = Attachment(item.kind, None, title=item.title, artist=item.artist,
                                 remote_url=item.url, platform=platform, referer=referer)
@@ -361,10 +386,10 @@ def materialize_remote(attachment: Attachment, directory: Path, index: int = 0) 
         raw.unlink(missing_ok=True)
 
 
-def download_post(link: Link, directory: Path, settings: Settings) -> Post:
+def download_post(link: Link, directory: Path, settings: Settings, fast: bool = True) -> Post:
     cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
     photo_fallback = None
-    if link.platform == "youtube":
+    if link.platform == "youtube" and fast:
         try:
             return Post([youtube_remote(link.url, cookies)])
         except MediaError as exc:
@@ -393,8 +418,11 @@ def download_post(link: Link, directory: Path, settings: Settings) -> Post:
             target = directory / f"provider-{index}"
             target.mkdir()
             try:
+                provider_started = time.monotonic()
                 items = provider()
-                post = download_items(link.platform, items, link.url)
+                LOG.info("%s / поиск источника %s: %.1f с", link.platform, index + 1,
+                         time.monotonic() - provider_started)
+                post = download_items(client, link.platform, items, target, link.url, fast)
                 if not post.visual:
                     continue
                 photos = [item for item in post.visual if item.kind == "photo"]
@@ -416,6 +444,37 @@ def download_post(link: Link, directory: Path, settings: Settings) -> Post:
 
 
 def download_track(query: str, directory: Path, settings: Settings) -> Attachment:
+    for search, platform, media_format in (
+        ("scsearch1", "soundcloud", "bestaudio[ext=mp3]/bestaudio"),
+        ("ytsearch1", "youtube", "bestaudio[ext=m4a]"),
+    ):
+        try:
+            return track_remote(query, search, platform, media_format, settings.youtube_cookies)
+        except MediaError as exc:
+            LOG.info("Поиск трека / быстрый %s: %s", platform, str(exc))
+    return download_track_local(query, directory, settings)
+
+
+def track_remote(query: str, search: str, platform: str, media_format: str,
+                 cookies: Path | None) -> Attachment:
+    args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--no-playlist", "--no-warnings",
+            "--quiet", "--use-extractors", "default,-generic", "--compat-options", "no-certifi",
+            "--socket-timeout", "5", "--retries", "0", "--extractor-retries", "0",
+            "--match-filters", "!is_live & duration <=? 1200", "--format", media_format, "--get-url"]
+    if platform == "youtube" and cookies:
+        args += ["--cookies", str(cookies)]
+    output = run([*args, "--", f"{search}:{query}"], 8)
+    media_url = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
+    if not media_url or not cdn_url(media_url, platform):
+        raise MediaError("Источник не выдал прямую ссылку на аудио")
+    if platform == "soundcloud" and urlsplit(media_url).path.lower().endswith(".m3u8"):
+        raise MediaError("SoundCloud выдал поток вместо аудиофайла")
+    return Attachment("audio", None, title=query, remote_url=media_url, platform=platform,
+                      referer="https://soundcloud.com/" if platform == "soundcloud"
+                      else "https://www.youtube.com/")
+
+
+def download_track_local(query: str, directory: Path, settings: Settings) -> Attachment:
     for name, cookies in (("ytsearch1", settings.youtube_cookies), ("scsearch1", None)):
         source = directory / name
         source.mkdir()
