@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from threading import Event
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -353,7 +354,7 @@ def twitter(client: httpx.Client, link: Link) -> list[Remote]:
 
 
 def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
-          timeout: int = 90, native_info: dict | None = None) -> Attachment:
+          timeout: int = 90, native_info: dict | None = None, cancel_event=None) -> Attachment:
     from downloader import extract, warmup
     _, target_type = warmup()
     options = {"outtmpl": str(directory / "download.%(ext)s"),
@@ -367,7 +368,8 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
         shutil.copyfile(cookies, cookie_copy)
         cookie_copy.chmod(0o600)
         options["cookiefile"] = str(cookie_copy)
-    options["format"] = ("bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best" if audio else
+    options["format"] = ("bestaudio[ext=m4a][format_id!*=preview]/bestaudio[ext=mp3][format_id!*=preview]/"
+        "bestaudio[format_id!*=preview]/best[format_id!*=preview]" if audio else
         "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
         "bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
         "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
@@ -382,7 +384,8 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
     options["match_filter"] = match
     download_started = time.monotonic()
     try:
-        info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info)
+        info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info,
+                       cancel_event=cancel_event)
     except Exception as exc:
         hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
         raise MediaError(f"yt-dlp: {hint[:340]}") from None
@@ -557,16 +560,64 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
     raise MediaError("Источник не выдал фото")
 
 
+def track_matches(query: str, title: str, artist: str = "") -> bool:
+    words = lambda value: set(re.findall(r"\w+", value.casefold()))
+    query_words, title_words, artist_words = words(query), words(title), words(artist)
+    decoration = {"official", "audio", "video", "lyrics", "lyric", "hd", "hq", "topic"}
+    return bool(title_words) and not (title_words - query_words - artist_words - decoration) and not (
+        query_words - title_words - artist_words - decoration)
+
+
+def search_download(query, search, directory, cookies, stop):
+    from downloader import extract, warmup
+    options = {"extract_flat": True}
+    if search == "ytsearch":
+        options["impersonate"] = warmup()[1].from_str("chrome")
+    if cookies:
+        cookie_copy = directory / "lookup-session.txt"
+        shutil.copyfile(cookies, cookie_copy)
+        cookie_copy.chmod(0o600)
+        options["cookiefile"] = str(cookie_copy)
+    results = extract(f"{search}3:{query}", options, download=False, timeout=12,
+                      cancel_event=stop, playlist=True)
+    for index, entry in enumerate(results.get("entries") or []):
+        title = text(entry.get("track") or entry.get("title"))
+        artist = text(entry.get("artist") or entry.get("uploader") or entry.get("channel"))
+        if not track_matches(query, title, artist):
+            continue
+        url = entry.get("webpage_url") or entry.get("url")
+        if not url or not isinstance(url, str):
+            continue
+        if search == "ytsearch" and not url.startswith("https://"):
+            url = f"https://www.youtube.com/watch?v={entry['id']}"
+        target = directory / str(index)
+        target.mkdir(exist_ok=True)
+        try:
+            result = ytdlp(url, target, cookies, audio=True, timeout=20, cancel_event=stop)
+        except MediaError as exc:
+            LOG.info("Поиск / кандидат недоступен целиком: %s", error_detail(exc))
+            if stop.is_set():
+                raise
+            continue
+        if track_matches(query, result.title, result.artist) or track_matches(query, title, artist):
+            return result
+    raise MediaError("Не найдено точное совпадение исполнителя и названия")
+
+
 def download_track(query: str, directory: Path, settings: Settings) -> Attachment:
     futures = {}
-    for search, platform, media_format in (
-        ("ytsearch1", "youtube", "bestaudio[ext=m4a]"),
-        ("scsearch1", "soundcloud", "bestaudio[ext=mp3]/bestaudio"),
+    cancelled = {}
+    for search, platform, cookies in (
+        ("ytsearch", "youtube", settings.youtube_cookies),
+        ("scsearch", "soundcloud", None),
     ):
-        future = SEARCH_POOL.submit(track_remote, query, search, platform, media_format,
-                                    settings.youtube_cookies)
+        target = directory / platform
+        target.mkdir(exist_ok=True)
+        stop = Event()
+        future = SEARCH_POOL.submit(search_download, query, search, target, cookies, stop)
         futures[future] = platform
-    deadline = time.monotonic() + 12
+        cancelled[future] = stop
+    deadline = time.monotonic() + 25
     pending = set(futures)
     try:
         while pending:
@@ -581,8 +632,9 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
                     LOG.info("Поиск трека / быстрый %s: %s", futures[future], error_detail(exc))
     finally:
         for future in pending:
+            cancelled[future].set()
             future.cancel()
-    return download_track_local(query, directory, settings)
+    raise MediaError("Источники музыки не выдали готовый трек за 25 секунд")
 
 
 def track_remote(query: str, search: str, platform: str, media_format: str,

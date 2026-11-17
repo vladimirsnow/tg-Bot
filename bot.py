@@ -11,8 +11,9 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import ExitStack
+from contextvars import ContextVar
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,9 +31,12 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
                    download_track_local, error_detail, materialize_remote, recover_post, load_post, photo_audio)
 from settings import Settings
 from runtime import WebhookRuntime
+from music_engine import MusicEngine
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.24"
+BUILD = "2026.11.17.25"
+MUSIC_TIMEOUT = 35
+MUSIC_STATE = ContextVar("music_state", default=None)
 
 
 class ProbeLog(logging.Handler):
@@ -174,7 +178,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.send_error(403)
                 return
             payload = json.dumps({"result": HealthHandler.probe_result, "logs": HealthHandler.probe_logs,
-                                  "allowed_chat_ids": sorted(self.media_bot.settings.chat_ids)},
+                                  "allowed_chat_ids": sorted(self.media_bot.settings.chat_ids),
+                                  "music_jobs": [{"stage": item["stage"],
+                                                  "elapsed": round(time.monotonic() - item["started"], 1)}
+                                                 for item in list(self.media_bot.active_music.values())]},
                                  ensure_ascii=False)
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -223,6 +230,7 @@ class Job:
     message: Message
     link: Link | None = None
     track: str | None = None
+    queued_at: float = field(default_factory=time.monotonic)
 
 
 class MediaBot:
@@ -235,10 +243,16 @@ class MediaBot:
         self.trigger = settings.trigger
         self.username = ""
         self.media_cache = OrderedDict()
+        self.music_engine = MusicEngine()
+        self.active_music = {}
 
     async def start(self, app: Application) -> None:
         from downloader import warmup
         await asyncio.to_thread(warmup)
+        try:
+            await self.music_engine.start()
+        except Exception as exc:
+            LOG.warning("Музыкальный процесс / запуск: %s", type(exc).__name__)
         HealthHandler.media_bot = self
         HealthHandler.loop = asyncio.get_running_loop()
         self.username = app.bot.username
@@ -260,6 +274,7 @@ class MediaBot:
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        await self.music_engine.abort()
 
     async def receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
@@ -304,7 +319,10 @@ class MediaBot:
             if queue.full():
                 await self.say(context.bot, message, "Очередь занята. Пришли запрос чуть позже.")
                 break
+            ahead = queue.qsize() + (1 if job.track and self.active_music else 0)
             queue.put_nowait(job)
+            if job.track and ahead:
+                await self.say(context.bot, message, f"🎵 Запрос принят. Перед ним в очереди: {ahead}.")
 
     async def receive_tracked(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.receive(update, context)
@@ -328,7 +346,7 @@ class MediaBot:
                        target_chat_id: int | None = None) -> None:
         trace = ProbeLog()
         HealthHandler.probe_logs = trace.lines
-        loggers = (LOG, logging.getLogger("media"), logging.getLogger("downloader"))
+        loggers = (LOG, logging.getLogger("media"), logging.getLogger("downloader"), logging.getLogger("music_engine"))
         for logger in loggers:
             logger.addHandler(trace)
         try:
@@ -349,6 +367,37 @@ class MediaBot:
             HealthHandler.probe_logs = trace.lines
 
     async def process(self, bot: Bot, job: Job) -> bool:
+        if not job.track:
+            return await self._process(bot, job)
+        budget = min(MUSIC_TIMEOUT, 60 - (time.monotonic() - job.queued_at))
+        if budget <= 0:
+            try:
+                async with asyncio.timeout(5):
+                    await self.say(bot, job.message, "Запрос слишком долго ждал в очереди. Отправь его ещё раз.")
+            except (TimeoutError, TelegramError):
+                pass
+            return False
+        state = {"status": None, "stage": "поиск", "started": time.monotonic()}
+        identity = id(asyncio.current_task())
+        self.active_music[identity] = state
+        context = MUSIC_STATE.set(state)
+        try:
+            async with asyncio.timeout(budget):
+                return await self._process(bot, job)
+        except TimeoutError:
+            LOG.warning("Музыка / общий лимит %s с, этап: %s", MUSIC_TIMEOUT, state["stage"])
+            try:
+                async with asyncio.timeout(5):
+                    await self.finish_status(bot, job.message, state["status"],
+                        "Источник музыки не ответил за 35 секунд. Попробуй указать исполнителя и название точнее.")
+            except (TimeoutError, TelegramError):
+                pass
+            return False
+        finally:
+            self.active_music.pop(identity, None)
+            MUSIC_STATE.reset(context)
+
+    async def _process(self, bot: Bot, job: Job) -> bool:
         cache_key = job.link.url if job.link else "track:" + (job.track or "").strip().casefold()
         cached = self.media_cache.get(cache_key)
         if cached:
@@ -378,9 +427,12 @@ class MediaBot:
                 source = job.track
             try:
                 status = await self.send(lambda: bot.send_message(
-                    **self.destination(job.message), text="⏳ Получаю медиа…"))
+                    **self.destination(job.message), text="🎵 Ищу трек…" if job.track else "⏳ Получаю медиа…"))
             except TelegramError:
                 pass
+            music = MUSIC_STATE.get()
+            if music is not None:
+                music["status"] = status
             try:
                 result = await self.load(loader, source, directory)
             except (MediaError, OSError, ValueError) as exc:
@@ -395,7 +447,9 @@ class MediaBot:
                 return False
             LOG.info("%s / источник подготовлен за %.1f с", label, asyncio.get_running_loop().time() - started)
             try:
-                await self.edit_status(status, "⏳ Передаю медиа в Telegram…")
+                if music is not None:
+                    music["stage"] = "отправка"
+                await self.edit_status(status, "🎵 Отправляю трек…" if job.track else "⏳ Передаю медиа в Telegram…")
                 if isinstance(result, Attachment):
                     delivered = await self.send_single(bot, job.message, result, directory)
                 elif (len(result.visual) == 1 and not result.audio and not result.audio_source
@@ -472,6 +526,12 @@ class MediaBot:
             pass
 
     async def load(self, loader, source, directory):
+        if loader is download_track or loader is download_track_local:
+            state = MUSIC_STATE.get()
+            if state is not None:
+                state["stage"] = "поиск и скачивание"
+            return await self.music_engine.request("search" if loader is download_track else "local",
+                                                   source, directory, self.settings)
         # Keep the temporary files in place while a download finishes during shutdown.
         task = asyncio.create_task(asyncio.to_thread(loader, source, directory, self.settings))
         try:
