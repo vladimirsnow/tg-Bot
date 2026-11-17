@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import tempfile
 import threading
 import unittest
+import os
 import httpx
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +23,18 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_youtube_environment_cookies_are_private_and_validated(self):
+        content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tTEST\tvalue\n"
+        values = {"TELEGRAM_BOT_TOKEN": "123:" + "a" * 24,
+                  "YOUTUBE_COOKIES_BASE64": base64.b64encode(content.encode()).decode()}
+        with patch("settings.load_dotenv"), patch.dict(os.environ, values, clear=True):
+            settings = Settings.load()
+            try:
+                self.assertEqual(settings.youtube_cookies.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(settings.youtube_cookies.read_text(), content)
+            finally:
+                settings.youtube_cookies.unlink()
+
     def test_tiktok_prefers_h264_even_for_tall_portrait_videos(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

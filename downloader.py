@@ -2,6 +2,8 @@
 import logging
 import re
 import time
+import tempfile
+from pathlib import Path
 
 LOG = logging.getLogger(__name__)
 
@@ -36,15 +38,19 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
         if time.monotonic() > deadline:
             raise TimeoutError("Download deadline exceeded")
 
+    cache = Path(tempfile.gettempdir()) / "telegram-media-extractor-cache"
+    cache.mkdir(mode=0o700, exist_ok=True)
     params = {
         "quiet": True, "no_warnings": True, "noprogress": True,
-        "logger": QuietLogger(), "cachedir": False, "noplaylist": True,
+        "logger": QuietLogger(), "cachedir": str(cache), "noplaylist": True,
         "socket_timeout": 6, "retries": 0, "fragment_retries": 0,
         "source_address": "0.0.0.0",
         "extractor_retries": 0, "compat_opts": {"no-certifi"},
         "js_runtimes": {"deno": {}}, "progress_hooks": [progress],
     }
     params.update(options or {})
+    if params.get("cookiefile") and "extractor_args" not in params:
+        params["extractor_args"] = {"youtube": {"player_client": ["web"]}}
     if (url.startswith(("https://www.youtube.com/", "https://youtube.com/", "ytsearch"))
             and not params.get("cookiefile") and "extractor_args" not in params):
         params["extractor_args"] = {"youtube": {

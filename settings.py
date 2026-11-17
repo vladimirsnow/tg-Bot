@@ -1,5 +1,8 @@
 import os
 import re
+import base64
+import http.cookiejar
+from tempfile import NamedTemporaryFile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +44,25 @@ class Settings:
                 if not path.is_file() or not os.access(path, os.R_OK):
                     raise ValueError(f"Файл из {name} недоступен для чтения.")
                 return path
+            if name == "YOUTUBE_COOKIES_FILE" and (encoded := os.getenv("YOUTUBE_COOKIES_BASE64", "").strip()):
+                temporary = None
+                try:
+                    if len(encoded) > 180000:
+                        raise ValueError()
+                    content = base64.b64decode(encoded, validate=True).decode("utf-8")
+                    with NamedTemporaryFile(mode="w", prefix="telegram-youtube-env-", suffix=".txt", delete=False) as handle:
+                        handle.write(content)
+                        temporary = Path(handle.name)
+                    jar = http.cookiejar.MozillaCookieJar(str(temporary))
+                    jar.load(ignore_discard=True, ignore_expires=False)
+                    if not jar or any(c.domain.lstrip(".") not in {"youtube.com", "www.youtube.com", "music.youtube.com"}
+                                      for c in jar):
+                        raise ValueError()
+                    return temporary
+                except Exception:
+                    if temporary:
+                        temporary.unlink(missing_ok=True)
+                    raise ValueError("YOUTUBE_COOKIES_BASE64 должен содержать cookies YouTube в формате Netscape, закодированные в base64.") from None
             return None
 
         return cls(token, trigger, chat_ids, int(owner) if owner else None, cookies("INSTAGRAM_COOKIES_FILE"),
