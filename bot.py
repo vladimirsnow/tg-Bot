@@ -32,7 +32,7 @@ from settings import Settings
 from runtime import WebhookRuntime
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.23"
+BUILD = "2026.11.17.24"
 
 
 class ProbeLog(logging.Handler):
@@ -109,6 +109,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                 link = None
             elif not link:
                 raise ValueError()
+            target_chat_id = payload.get("chat_id", worker.settings.owner_user_id)
+            if type(target_chat_id) is not int or (
+                    target_chat_id != worker.settings.owner_user_id and target_chat_id not in worker.settings.chat_ids):
+                raise ValueError()
         except (ValueError, TypeError, AttributeError):
             self.send_error(400)
             return
@@ -118,7 +122,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 return
             HealthHandler.probe_result = "running"
             HealthHandler.probe_logs = []
-            HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(link, query), self.loop)
+            HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(link, query, target_chat_id), self.loop)
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"started\n")
@@ -169,7 +173,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             if not self.probe_authorized():
                 self.send_error(403)
                 return
-            payload = json.dumps({"result": HealthHandler.probe_result, "logs": HealthHandler.probe_logs},
+            payload = json.dumps({"result": HealthHandler.probe_result, "logs": HealthHandler.probe_logs,
+                                  "allowed_chat_ids": sorted(self.media_bot.settings.chat_ids)},
                                  ensure_ascii=False)
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -319,7 +324,8 @@ class MediaBot:
             finally:
                 queue.task_done()
 
-    async def selftest(self, link: Link | None = None, query: str | None = None) -> None:
+    async def selftest(self, link: Link | None = None, query: str | None = None,
+                       target_chat_id: int | None = None) -> None:
         trace = ProbeLog()
         HealthHandler.probe_logs = trace.lines
         loggers = (LOG, logging.getLogger("media"), logging.getLogger("downloader"))
@@ -327,7 +333,10 @@ class MediaBot:
             logger.addHandler(trace)
         try:
             bot = HealthHandler.application.bot
-            message = await bot.send_message(chat_id=self.settings.owner_user_id,
+            target = target_chat_id if target_chat_id is not None else self.settings.owner_user_id
+            if target != self.settings.owner_user_id and target not in self.settings.chat_ids:
+                raise ValueError("Unapproved test destination")
+            message = await bot.send_message(chat_id=target,
                                             text="Проверка с сервера Render: " + ("поиск музыки" if query else link.platform))
             success = await self.process(bot, Job(message, link=link, track=query))
             HealthHandler.probe_result = "delivered" if success else "failed"

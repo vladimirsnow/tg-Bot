@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import base64
 import http.cookiejar
 from tempfile import NamedTemporaryFile
@@ -34,6 +35,15 @@ class Settings:
             raise ValueError("ALLOWED_CHAT_IDS должен содержать ID чатов через запятую.") from None
         if any(chat_id >= 0 for chat_id in chat_ids):
             raise ValueError("Укажи отрицательный ID группы в ALLOWED_CHAT_IDS.")
+        chat_config = Path(__file__).with_name("allowed_chats.json")
+        if chat_config.is_file():
+            try:
+                configured = json.loads(chat_config.read_text(encoding="utf-8"))
+                if not isinstance(configured, list) or any(type(value) is not int or value >= 0 for value in configured):
+                    raise ValueError()
+                chat_ids = chat_ids | frozenset(configured)
+            except (OSError, ValueError):
+                raise ValueError("allowed_chats.json должен содержать список отрицательных ID групп.") from None
         owner = os.getenv("OWNER_USER_ID", "").strip()
         if owner and not re.fullmatch(r"[1-9][0-9]{0,15}", owner):
             raise ValueError("OWNER_USER_ID должен содержать положительный ID пользователя.")

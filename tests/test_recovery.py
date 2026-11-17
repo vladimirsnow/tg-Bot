@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telegram.error import BadRequest
+from telegram import Update
+from dataclasses import replace
 
 from bot import Job, MediaBot, HealthHandler
 from links import parse_link
@@ -23,6 +25,13 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_project_groups_are_merged_with_environment_groups(self):
+        values = {"TELEGRAM_BOT_TOKEN": "123:" + "a" * 24, "ALLOWED_CHAT_IDS": "-1005"}
+        with patch("settings.load_dotenv"), patch.dict(os.environ, values, clear=True):
+            settings = Settings.load()
+            self.assertIn(-1005, settings.chat_ids)
+            self.assertIn(-1002368553296, settings.chat_ids)
+
     def test_youtube_environment_cookies_are_private_and_validated(self):
         content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tTEST\tvalue\n"
         values = {"TELEGRAM_BOT_TOKEN": "123:" + "a" * 24,
@@ -139,6 +148,25 @@ class RecoveryTests(unittest.TestCase):
 
 
 class SenderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_allowed_group_accepts_links_from_regular_members(self):
+        group = -1002368553296
+        worker = MediaBot(replace(SETTINGS, chat_ids=frozenset({group})))
+        context = SimpleNamespace(bot=AsyncMock())
+
+        def update(chat_id, chat_type):
+            return Update.de_json({"update_id": 1, "message": {"message_id": 2, "date": 1794900000,
+                "chat": {"id": chat_id, "type": chat_type},
+                "from": {"id": 999, "first_name": "Member", "is_bot": False},
+                "text": "https://vt.tiktok.com/ZSpGEBawN/"}}, None)
+
+        await worker.receive(update(-100999, "supergroup"), context)
+        self.assertTrue(worker.queue.empty())
+        await worker.receive(update(999, "private"), context)
+        self.assertTrue(worker.queue.empty())
+        await worker.receive(update(group, "supergroup"), context)
+        self.assertEqual(worker.queue.qsize(), 1)
+        self.assertEqual(worker.queue.get_nowait().message.chat_id, group)
+
     async def test_cached_video_does_not_download_again(self):
         worker = MediaBot(SETTINGS)
         link = parse_link("https://youtube.com/shorts/v2M26i19fvI")
