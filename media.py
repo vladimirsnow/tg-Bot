@@ -64,6 +64,7 @@ class Post:
     visual: list[Attachment] = field(default_factory=list)
     audio: list[Attachment] = field(default_factory=list)
     incomplete: bool = False
+    audio_source: Link | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,16 @@ def as_photo(source: Path, target: Path) -> Attachment:
 
 
 def as_audio(source: Path, target: Path, title: str = "", artist: str = "") -> Attachment:
+    probe = json.loads(run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                            "-show_entries", "stream=codec_name", "-of", "json", str(source)], 10))
+    streams = probe.get("streams") or []
+    codec = streams[0].get("codec_name") if streams else None
+    if codec in {"mp3", "aac"} and source.stat().st_size <= UPLOAD_LIMIT:
+        target = target.with_suffix(".mp3" if codec == "mp3" else ".m4a")
+        run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(source),
+             "-map", "0:a:0", "-vn", "-c:a", "copy", str(target)], 20)
+        if 0 < target.stat().st_size <= UPLOAD_LIMIT:
+            return Attachment("audio", target, title or "Аудио", artist)
     run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-threads", "1", "-i", str(source),
          "-map", "0:a:0", "-map_metadata", "-1", "-c:a", "libmp3lame", "-b:a", "160k",
          "-threads", "1", str(target)], 100)
@@ -207,13 +218,39 @@ def as_video(source: Path, target: Path) -> Attachment:
     return Attachment("video", target, width=width, height=height, duration=round(duration))
 
 
+def tiktok_rows(url: str, depth: int = 0):
+    from gallery_dl import extractor
+    if depth > 3:
+        raise MediaError("Слишком много перенаправлений TikTok")
+    source = extractor.find(url)
+    if source is None:
+        raise MediaError("Не найден обработчик TikTok")
+    source.log = logging.Logger("gallery-private", level=logging.CRITICAL)
+    source.initialize()
+    source._retries = 0
+    source._timeout = 6
+    try:
+        for row in source.items():
+            if row[0] == 6:
+                child = parse_link(row[1])
+                if child and child.platform == "tiktok":
+                    yield from tiktok_rows(child.url, depth + 1)
+            else:
+                yield row
+    finally:
+        source.session.close()
+
+
 def gallery(link: Link, cookies: Path | None) -> list[Remote]:
     args = ["gallery-dl", "--config-ignore", "--http-timeout", "12", "--retries", "0", "-J"]
     if link.platform == "instagram":
         args += ["-o", "extractor.instagram.audio=merged", "-o", "extractor.instagram.videos=merged"]
         if cookies:
             args += ["--cookies", str(cookies)]
-    data = json.loads(run([*args, "--", link.url], 42))
+    if link.platform == "tiktok":
+        data = tiktok_rows(link.url)
+    else:
+        data = json.loads(run([*args, "--", link.url], 42))
     result = []
     for row in data:
         if len(row) != 3 or row[0] != 3:
@@ -235,6 +272,21 @@ def gallery(link: Link, cookies: Path | None) -> list[Remote]:
                 music = metadata.get("music") or {}
                 result.append(Remote(kind, url, text(music.get("title")), text(music.get("authorName"))))
     return result
+
+
+def photo_audio(link: Link, directory: Path, settings: Settings) -> Attachment:
+    directory.mkdir(parents=True, exist_ok=True)
+    with httpx.Client(timeout=6, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        for provider in (lambda: gallery(link, None), lambda: tikwm(client, link)):
+            try:
+                for item in provider():
+                    if item.kind == "audio" and cdn_url(item.url, "tiktok"):
+                        remote = Attachment("audio", None, item.title, item.artist,
+                                            remote_url=item.url, platform="tiktok", referer=link.url)
+                        return materialize_remote(remote, directory)
+            except Exception as exc:
+                LOG.info("TikTok / резерв звука: %s", error_detail(exc))
+    return ytdlp(link.url, directory, None, audio=True, timeout=30)
 
 
 def instagram_embed(client: httpx.Client, link: Link) -> list[Remote]:
@@ -290,52 +342,45 @@ def twitter(client: httpx.Client, link: Link) -> list[Remote]:
 
 def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
           timeout: int = 90) -> Attachment:
-    args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--use-extractors", "default,-generic",
-            "--compat-options", "no-certifi",
-            "--no-playlist", "--no-progress", "--socket-timeout", "12", "--retries", "1",
-            "--fragment-retries", "1", "--extractor-retries", "1", "--max-filesize", "100M",
-            "--windows-filenames", "-o", str(directory / "download.%(ext)s")]
+    from downloader import extract, warmup
+    _, target_type = warmup()
+    options = {"outtmpl": str(directory / "download.%(ext)s"),
+               "max_filesize": SOURCE_LIMIT, "windowsfilenames": True,
+               "merge_output_format": "mp4"}
     link = parse_link(url)
     if link and link.platform in {"tiktok", "instagram"}:
-        args += ["--impersonate", "chrome"]
+        options["impersonate"] = target_type.from_str("chrome")
     if cookies:
         cookie_copy = directory / "session.txt"
         shutil.copyfile(cookies, cookie_copy)
         cookie_copy.chmod(0o600)
-        args += ["--cookies", str(cookie_copy)]
-    if audio:
-        args += ["--match-filters", "!is_live & duration <=? 1200", "-f", "bestaudio/best",
-                 "--print", "after_move:[%(title)j,%(artist,creator,uploader)j]"]
-    else:
-        args += ["--match-filters", "!is_live & duration <=? 900", "--merge-output-format", "mp4",
-                 "--format", "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
-                          "bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
-                          "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
-                          "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
-                          "b[ext=mp4]/b[height<=720]/b"]
-    output = run([*args, "--", url], timeout)
+        options["cookiefile"] = str(cookie_copy)
+    options["format"] = ("bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best" if audio else
+        "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
+        "bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+        "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
+        "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/b")
+    def match(info, *, incomplete=False):
+        duration = info.get("duration") or 0
+        if info.get("is_live") or duration > (1200 if audio else 900):
+            return "Media exceeds duration limit"
+    options["match_filter"] = match
+    try:
+        info = extract(url, options, download=True, timeout=timeout)
+    except Exception as exc:
+        hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
+        raise MediaError(f"yt-dlp: {hint[:180]}") from None
     source = next((path for path in directory.glob("download.*") if path.is_file()
                    and path.suffix.lower() in {".mp4", ".m4a", ".mp3", ".webm", ".ogg", ".opus", ".mkv", ".aac"}), None)
-    if not source or source.stat().st_size > SOURCE_LIMIT:
+    if not source or not 0 < source.stat().st_size <= SOURCE_LIMIT:
         raise MediaError("Медиа отсутствует или превышает лимит")
     if audio:
-        title, artist = json.loads(output.strip().splitlines()[-1]) if output.strip() else ("", "")
-        return as_audio(source, directory / "track.mp3", text(title) or url.partition(":")[2], text(artist))
+        title = text(info.get("track") or info.get("title"))
+        artist = text(info.get("artist") or info.get("creator") or info.get("uploader"))
+        if source.suffix.lower() in {".m4a", ".mp3"} and source.stat().st_size <= UPLOAD_LIMIT:
+            return Attachment("audio", source, title, artist)
+        return as_audio(source, directory / "track.mp3", title, artist)
     return as_video(source, directory / "video.mp4")
-
-
-def youtube_remote(url: str, cookies: Path | None) -> Attachment:
-    args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--no-playlist", "--no-warnings",
-            "--quiet", "--use-extractors", "default,-generic", "--compat-options", "no-certifi",
-            "--socket-timeout", "5", "--retries", "0", "--extractor-retries", "0",
-            "--format", "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]", "--get-url"]
-    if cookies:
-        args += ["--cookies", str(cookies)]
-    output = run([*args, "--", url], 12)
-    media_url = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
-    if not media_url or not cdn_url(media_url, "youtube"):
-        raise MediaError("YouTube не выдал прямой MP4")
-    return Attachment("video", None, remote_url=media_url, platform="youtube", referer=url)
 
 
 def download_items(client: httpx.Client, platform: str, items: list[Remote], directory: Path,
@@ -430,12 +475,8 @@ def load_post(link: Link, directory: Path, settings: Settings) -> Post:
 def download_post(link: Link, directory: Path, settings: Settings, fast: bool = True) -> Post:
     cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
     photo_fallback = None
-    if link.platform == "youtube" and fast:
-        try:
-            return Post([youtube_remote(link.url, cookies)])
-        except MediaError as exc:
-            LOG.info("YouTube / быстрый MP4: %s", str(exc))
-            return Post([ytdlp(link.url, directory, cookies)])
+    if link.platform == "youtube":
+        return Post([ytdlp(link.url, directory, cookies)])
     with httpx.Client(timeout=12, headers={"User-Agent": "Mozilla/5.0", "Referer": link.url}) as client:
         if link.platform == "instagram" and not link.post_id:
             for _ in range(4):
@@ -451,7 +492,7 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                 raise MediaError("Не удалось раскрыть короткую ссылку Instagram")
         providers = {
             "instagram": [lambda: instagram_embed(client, link), lambda: gallery(link, cookies)],
-            "tiktok": [lambda: tikwm(client, link), lambda: gallery(link, None)],
+            "tiktok": [lambda: gallery(link, None), lambda: tikwm(client, link)],
             "twitter": [lambda: twitter(client, link)],
             "youtube": [],
         }
@@ -459,13 +500,6 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
             target = directory / f"provider-{index}"
             target.mkdir(exist_ok=True)
             try:
-                if fast and link.platform == "tiktok" and index == 1 and not link.is_photo:
-                    native = directory / "tiktok-native"
-                    native.mkdir(exist_ok=True)
-                    try:
-                        return Post([ytdlp(link.url, native, None, timeout=45)])
-                    except (MediaError, OSError, ValueError) as exc:
-                        LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 provider_started = time.monotonic()
                 items = provider()
                 LOG.info("%s / источник %s вернул %s файлов за %.1f с", link.platform, index + 1,
@@ -475,11 +509,17 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                 if not post.visual:
                     continue
                 photos = [item for item in post.visual if item.kind == "photo"]
+                if link.platform == "tiktok" and photos:
+                    post.audio_source = link
                 if photo_fallback and not photos:
                     continue
-                if link.platform == "tiktok" and photos and not post.audio:
-                    photo_fallback = photo_fallback or post
-                    continue
+                if fast and link.platform == "tiktok" and len(post.visual) == 1 and not photos:
+                    native = directory / "tiktok-native"
+                    native.mkdir(exist_ok=True)
+                    try:
+                        return Post([ytdlp(link.url, native, None, timeout=45)])
+                    except (MediaError, OSError, ValueError) as exc:
+                        LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 if not link.is_photo or photos:
                     return post
             except (MediaError, httpx.HTTPError, ValueError, KeyError, TypeError, OSError) as exc:
@@ -494,8 +534,8 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
 
 def download_track(query: str, directory: Path, settings: Settings) -> Attachment:
     for search, platform, media_format in (
-        ("scsearch1", "soundcloud", "bestaudio[ext=mp3]/bestaudio"),
         ("ytsearch1", "youtube", "bestaudio[ext=m4a]"),
+        ("scsearch1", "soundcloud", "bestaudio[ext=mp3]/bestaudio"),
     ):
         try:
             return track_remote(query, search, platform, media_format, settings.youtube_cookies)
@@ -506,21 +546,21 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
 
 def track_remote(query: str, search: str, platform: str, media_format: str,
                  cookies: Path | None) -> Attachment:
-    args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--no-playlist", "--no-warnings",
-            "--quiet", "--use-extractors", "default,-generic", "--compat-options", "no-certifi",
-            "--socket-timeout", "5", "--retries", "0", "--extractor-retries", "0",
-            "--match-filters", "!is_live & duration <=? 1200", "--format", media_format, "--get-url"]
+    from downloader import extract
+    options = {"format": media_format}
     if platform == "youtube" and cookies:
-        args += ["--cookies", str(cookies)]
-    output = run([*args, "--", f"{search}:{query}"], 8)
-    media_url = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
-    if not media_url or not cdn_url(media_url, platform):
-        raise MediaError("Источник не выдал прямую ссылку на аудио")
-    if platform == "soundcloud" and urlsplit(media_url).path.lower().endswith(".m3u8"):
-        raise MediaError("SoundCloud выдал поток вместо аудиофайла")
-    return Attachment("audio", None, title=query, remote_url=media_url, platform=platform,
-                      referer="https://soundcloud.com/" if platform == "soundcloud"
-                      else "https://www.youtube.com/")
+        options["cookiefile"] = str(cookies)
+    try:
+        info = extract(f"{search}:{query}", options, download=False, timeout=15)
+    except Exception as exc:
+        raise MediaError(f"Поиск {platform}: {type(exc).__name__}") from None
+    media_url = info.get("url") or ""
+    if not cdn_url(media_url, platform) or ".m3u8" in urlsplit(media_url).path.lower():
+        raise MediaError("Источник не выдал прямой аудиофайл")
+    return Attachment("audio", None, title=text(info.get("track") or info.get("title")) or query,
+                      artist=text(info.get("artist") or info.get("uploader")),
+                      remote_url=media_url, platform=platform,
+                      referer=info.get("webpage_url") or "https://www.youtube.com/")
 
 
 def download_track_local(query: str, directory: Path, settings: Settings) -> Attachment:

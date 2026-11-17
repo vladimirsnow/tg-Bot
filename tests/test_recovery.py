@@ -53,6 +53,27 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(download_post(link, Path(temporary), SETTINGS).visual, [expected])
                 self.assertEqual(native.call_args.kwargs, {"timeout": 45})
 
+    def test_photo_and_music_from_same_source_do_not_wait_for_another_provider(self):
+        link = parse_link("https://www.tiktok.com/@example/photo/7708309252607151361")
+        items = [Remote("photo", "https://p16.tiktokcdn.com/photo.jpg"),
+                 Remote("audio", "https://sf16.tiktokcdn.com/song.mp3", "Song", "Artist")]
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("media.gallery", return_value=items), patch("media.tikwm") as slow_api, \
+                 patch("media.ytdlp") as video_downloader:
+                post = download_post(link, Path(temporary), SETTINGS)
+                self.assertEqual(len(post.visual), 1)
+                self.assertEqual(len(post.audio), 1)
+                self.assertEqual(post.audio_source, link)
+                slow_api.assert_not_called()
+                video_downloader.assert_not_called()
+
+    def test_shorts_needs_only_one_extraction(self):
+        link = parse_link("https://youtube.com/shorts/v2M26i19fvI")
+        item = Attachment("video", Path("/tmp/short.mp4"))
+        with tempfile.TemporaryDirectory() as temporary, patch("media.ytdlp", return_value=item) as native:
+            self.assertEqual(download_post(link, Path(temporary), SETTINGS).visual, [item])
+            native.assert_called_once()
+
     def test_recovery_uses_fresh_directory_and_native_downloader(self):
         link = parse_link("https://vt.tiktok.com/ZSpGEBawN/")
         with tempfile.TemporaryDirectory() as temporary:

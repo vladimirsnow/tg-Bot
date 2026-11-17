@@ -1,0 +1,53 @@
+"""Reuse yt-dlp imports across requests instead of restarting Python per job."""
+import logging
+import time
+
+LOG = logging.getLogger(__name__)
+
+
+def warmup():
+    import yt_dlp
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    from yt_dlp.extractor.youtube import YoutubeIE, YoutubeSearchIE
+    from yt_dlp.extractor.tiktok import TikTokIE
+    from yt_dlp.extractor.soundcloud import SoundcloudSearchIE
+    from gallery_dl.extractor.tiktok import TiktokExtractor
+    return yt_dlp, ImpersonateTarget
+
+
+class QuietLogger:
+    def debug(self, message):
+        pass
+
+    def warning(self, message):
+        pass
+
+    def error(self, message):
+        pass
+
+
+def extract(url, options=None, download=False, timeout=60):
+    yt_dlp, _ = warmup()
+    deadline = time.monotonic() + timeout
+
+    def progress(data):
+        if time.monotonic() > deadline:
+            raise TimeoutError("Download deadline exceeded")
+
+    params = {
+        "quiet": True, "no_warnings": True, "noprogress": True,
+        "logger": QuietLogger(), "cachedir": False, "noplaylist": True,
+        "socket_timeout": 6, "retries": 0, "fragment_retries": 0,
+        "extractor_retries": 0, "compat_opts": {"no-certifi"},
+        "js_runtimes": {"deno": {}}, "progress_hooks": [progress],
+    }
+    params.update(options or {})
+    with yt_dlp.YoutubeDL(params) as ydl:
+        info = ydl.extract_info(url, download=download)
+        if not info:
+            raise ValueError("No media returned")
+        if "entries" in info:
+            info = next((entry for entry in info["entries"] if entry), None)
+        if not info:
+            raise ValueError("Search returned no results")
+        return info

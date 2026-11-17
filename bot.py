@@ -23,11 +23,11 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageH
 
 from links import Link, links_in, music_query, parse_link
 from media import (Attachment, MediaError, Post, download_post, download_track,
-                   download_track_local, error_detail, materialize_remote, recover_post, load_post)
+                   download_track_local, error_detail, materialize_remote, recover_post, load_post, photo_audio)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.7"
+BUILD = "2026.11.17.8"
 
 
 class ProbeLog(logging.Handler):
@@ -63,13 +63,29 @@ class HealthHandler(BaseHTTPRequestHandler):
         if not self.application or not self.application.running or not worker.settings.owner_user_id:
             self.send_error(503)
             return
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 <= size <= 4096:
+                raise ValueError()
+            payload = json.loads(self.rfile.read(size)) if size else {}
+            link = parse_link(payload.get("url", "https://vt.tiktok.com/ZSpGEBawN/"))
+            query = payload.get("track")
+            if query is not None:
+                if not isinstance(query, str) or not 0 < len(query) <= 200:
+                    raise ValueError()
+                link = None
+            elif not link:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            self.send_error(400)
+            return
         with self.probe_lock:
             if HealthHandler.probe_future and not HealthHandler.probe_future.done():
                 self.send_error(409)
                 return
             HealthHandler.probe_result = "running"
             HealthHandler.probe_logs = []
-            HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(), self.loop)
+            HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(link, query), self.loop)
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"started\n")
@@ -145,6 +161,8 @@ class MediaBot:
         self.username = ""
 
     async def start(self, app: Application) -> None:
+        from downloader import warmup
+        await asyncio.to_thread(warmup)
         HealthHandler.media_bot = self
         HealthHandler.loop = asyncio.get_running_loop()
         self.username = app.bot.username
@@ -225,7 +243,7 @@ class MediaBot:
             finally:
                 queue.task_done()
 
-    async def selftest(self) -> None:
+    async def selftest(self, link: Link | None = None, query: str | None = None) -> None:
         trace = ProbeLog()
         HealthHandler.probe_logs = trace.lines
         loggers = (LOG, logging.getLogger("media"))
@@ -234,8 +252,8 @@ class MediaBot:
         try:
             bot = HealthHandler.application.bot
             message = await bot.send_message(chat_id=self.settings.owner_user_id,
-                                            text="Проверка TikTok с сервера Render: отправляю тестовый ролик.")
-            success = await self.process(bot, Job(message, link=parse_link("https://vt.tiktok.com/ZSpGEBawN/")))
+                                            text="Проверка с сервера Render: " + ("поиск музыки" if query else link.platform))
+            success = await self.process(bot, Job(message, link=link, track=query))
             HealthHandler.probe_result = "delivered" if success else "failed"
         except Exception as exc:
             LOG.warning("Проверка Render / %s", error_detail(exc))
@@ -378,6 +396,7 @@ class MediaBot:
                     await self.send(lambda: bot.send_audio(**destination, audio=attachment.remote_url,
                                          title=attachment.title, performer=attachment.artist or None,
                                          read_timeout=60))
+                LOG.info("Telegram / доставлен %s по прямой ссылке", attachment.kind)
                 return
             except (BadRequest, NetworkError) as exc:
                 if directory is None:
@@ -401,9 +420,11 @@ class MediaBot:
                     await bot.send_audio(**destination, audio=file, title=attachment.title,
                                          performer=attachment.artist or None, write_timeout=120)
         await self.send(upload)
+        LOG.info("Telegram / доставлен %s загрузкой файла", attachment.kind)
 
     async def send_post(self, bot: Bot, message: Message, post: Post, directory: Path) -> None:
         incomplete = post.incomplete
+        audio_delivered = False
         for start in range(0, len(post.visual), 10):
             group = post.visual[start:start + 10]
             if len(group) == 1:
@@ -414,9 +435,19 @@ class MediaBot:
         for attachment in post.audio:
             try:
                 await self.send_single(bot, message, attachment, directory)
+                audio_delivered = True
             except Exception as exc:
                 LOG.warning("Звук фотопоста / %s", error_detail(exc))
-                incomplete = True
+                if not post.audio_source:
+                    incomplete = True
+        if post.audio_source and not audio_delivered:
+            try:
+                audio = await self.load(photo_audio, post.audio_source, directory / "photo-audio")
+                await self.send_single(bot, message, audio, directory)
+                LOG.info("TikTok / звук фотопоста доставлен резервным путём")
+            except Exception as exc:
+                LOG.warning("TikTok / звук фотопоста не получен: %s", error_detail(exc))
+                await self.say(bot, message, "Фотографии отправлены, но источник не выдал доступную аудиодорожку.")
         if incomplete:
             await self.say(bot, message, "Часть медиа в этом посте недоступна или превышает лимит.")
 
@@ -435,6 +466,7 @@ class MediaBot:
             try:
                 await self.send(lambda: bot.send_media_group(**self.destination(message), media=media,
                                                              read_timeout=60))
+                LOG.info("Telegram / доставлен альбом: %s файлов", len(group))
                 return True
             except (BadRequest, NetworkError) as exc:
                 if directory is None:
@@ -468,6 +500,7 @@ class MediaBot:
                         album.append(InputMediaPhoto(file))
                 await bot.send_media_group(**self.destination(message), media=album, write_timeout=150)
         await self.send(upload)
+        LOG.info("Telegram / доставлен альбом: %s файлов загрузкой", len(group))
         return complete
 
 
