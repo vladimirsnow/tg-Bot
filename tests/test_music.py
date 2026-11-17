@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import httpx
 import tempfile
 import time
 import unittest
@@ -10,13 +11,32 @@ from unittest.mock import AsyncMock, patch
 from bot import Job, MediaBot
 from music_engine import MusicEngine
 from settings import Settings
-from media import track_matches, ytdlp
+from media import track_matches, ytdlp, search_audius, download_track, Attachment, MediaError
+from threading import Event
 
 
 SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class MusicTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    def test_audius_rejects_paid_or_gated_audio(self):
+        response = httpx.Response(200, request=httpx.Request("GET", "https://api.audius.co/search"),
+            json={"data": [{"id": "abc", "title": "Song", "user": {"name": "Artist"},
+                            "is_streamable": True, "is_stream_gated": True}]})
+        with tempfile.TemporaryDirectory() as temp, patch("media.httpx.Client") as client, \
+             patch("media.fetch") as fetch:
+            client.return_value.__enter__.return_value.get.return_value = response
+            with self.assertRaises(MediaError):
+                search_audius("Artist Song", Path(temp), Event())
+            fetch.assert_not_called()
+
+    def test_audius_can_win_when_other_music_sources_fail(self):
+        result = Attachment("audio", Path("/tmp/full-song.mp3"), "Song", "Artist")
+        with tempfile.TemporaryDirectory() as temp, \
+             patch("media.search_download", side_effect=MediaError("Unavailable")), \
+             patch("media.search_audius", return_value=result):
+            self.assertIs(download_track("Artist Song", Path(temp), SETTINGS), result)
+
     def test_preview_audio_is_excluded_from_all_format_fallbacks(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

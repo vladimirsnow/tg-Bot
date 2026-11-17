@@ -24,7 +24,7 @@ MIB = 1024 * 1024
 UPLOAD_LIMIT = 49 * MIB
 SOURCE_LIMIT = 100 * MIB
 MAX_PHOTOS = 35
-SEARCH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="music-search")
+SEARCH_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="music-search")
 CDNS = {
     "instagram": ("cdninstagram.com", "fbcdn.net", "fbsbx.com"),
     "tiktok": ("tiktok.com", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com",
@@ -118,10 +118,11 @@ def cdn_url(url: str, platform: str) -> bool:
         return False
 
 
-def fetch(client: httpx.Client, url: str, platform: str, target: Path, limit: int) -> None:
-    deadline = time.monotonic() + 45
+def fetch(client: httpx.Client, url: str, platform: str, target: Path, limit: int,
+          cancel_event=None, timeout: int = 45) -> None:
+    deadline = time.monotonic() + timeout
     for _ in range(5):
-        if not cdn_url(url, platform) or time.monotonic() > deadline:
+        if not cdn_url(url, platform) or time.monotonic() > deadline or (cancel_event and cancel_event.is_set()):
             raise MediaError("Недоступный адрес медиа")
         with client.stream("GET", url, follow_redirects=False) as response:
             if response.is_redirect and response.headers.get("location"):
@@ -135,7 +136,7 @@ def fetch(client: httpx.Client, url: str, platform: str, target: Path, limit: in
             with target.open("wb") as target_file:
                 for chunk in response.iter_bytes(128 * 1024):
                     received += len(chunk)
-                    if received > limit or time.monotonic() > deadline:
+                    if received > limit or time.monotonic() > deadline or (cancel_event and cancel_event.is_set()):
                         raise MediaError("Превышен лимит скачивания")
                     target_file.write(chunk)
             if received == 0:
@@ -605,6 +606,38 @@ def search_download(query, search, directory, cookies, stop):
     raise MediaError("Не найдено точное совпадение исполнителя и названия")
 
 
+def search_audius(query: str, directory: Path, stop) -> Attachment:
+    with httpx.Client(timeout=5, headers={"User-Agent": "TelegramMediaBot/1.0"}) as client:
+        response = client.get("https://api.audius.co/v1/tracks/search",
+                              params={"query": query, "limit": 8, "app_name": "telegram-media-bot"})
+        response.raise_for_status()
+        for track in response.json().get("data") or []:
+            if stop.is_set():
+                raise MediaError("Поиск отменён")
+            title, artist = text(track.get("title")), text((track.get("user") or {}).get("name"))
+            if not track_matches(query, title, artist):
+                continue
+            if (not track.get("is_streamable") or track.get("is_stream_gated")
+                    or track.get("stream_conditions") or (track.get("access") or {}).get("stream") is False
+                    or (track.get("duration") or 0) > 1200):
+                continue
+            identity = str(track.get("id", ""))
+            if not re.fullmatch(r"[A-Za-z0-9]+", identity):
+                continue
+            raw = directory / "audius-source"
+            try:
+                fetch(client, f"https://api.audius.co/v1/tracks/{identity}/stream?app_name=telegram-media-bot",
+                      "audius", raw, UPLOAD_LIMIT, cancel_event=stop, timeout=15)
+                if stop.is_set():
+                    raise MediaError("Поиск отменён")
+                return as_audio(raw, directory / "audius.mp3", title, artist)
+            except (MediaError, httpx.HTTPError, OSError) as exc:
+                LOG.info("Audius / файл: %s", error_detail(exc))
+            finally:
+                raw.unlink(missing_ok=True)
+    raise MediaError("В Audius нет доступного полного трека с таким названием")
+
+
 def download_track(query: str, directory: Path, settings: Settings) -> Attachment:
     futures = {}
     cancelled = {}
@@ -618,6 +651,12 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
         future = SEARCH_POOL.submit(search_download, query, search, target, cookies, stop)
         futures[future] = platform
         cancelled[future] = stop
+    target = directory / "audius"
+    target.mkdir(exist_ok=True)
+    stop = Event()
+    future = SEARCH_POOL.submit(search_audius, query, target, stop)
+    futures[future] = "audius"
+    cancelled[future] = stop
     deadline = time.monotonic() + 30
     pending = set(futures)
     try:
