@@ -43,6 +43,12 @@ def extract(url, options=None, download=False, timeout=60):
         "js_runtimes": {"deno": {}}, "progress_hooks": [progress],
     }
     params.update(options or {})
+    if (url.startswith(("https://www.youtube.com/", "https://youtube.com/", "ytsearch"))
+            and not params.get("cookiefile") and "extractor_args" not in params):
+        params["extractor_args"] = {"youtube": {
+            "player_client": ["android_vr"],
+            "innertube_host": ["youtubei.googleapis.com"],
+        }}
     with yt_dlp.YoutubeDL(params) as ydl:
         info = ydl.extract_info(url, download=download)
         if not info:
