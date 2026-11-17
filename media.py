@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -21,6 +22,7 @@ MIB = 1024 * 1024
 UPLOAD_LIMIT = 49 * MIB
 SOURCE_LIMIT = 100 * MIB
 MAX_PHOTOS = 35
+SEARCH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="music-search")
 CDNS = {
     "instagram": ("cdninstagram.com", "fbcdn.net", "fbsbx.com"),
     "tiktok": ("tiktok.com", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com",
@@ -533,14 +535,30 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
 
 
 def download_track(query: str, directory: Path, settings: Settings) -> Attachment:
+    futures = {}
     for search, platform, media_format in (
         ("ytsearch1", "youtube", "bestaudio[ext=m4a]"),
         ("scsearch1", "soundcloud", "bestaudio[ext=mp3]/bestaudio"),
     ):
-        try:
-            return track_remote(query, search, platform, media_format, settings.youtube_cookies)
-        except MediaError as exc:
-            LOG.info("Поиск трека / быстрый %s: %s", platform, str(exc))
+        future = SEARCH_POOL.submit(track_remote, query, search, platform, media_format,
+                                    settings.youtube_cookies)
+        futures[future] = platform
+    deadline = time.monotonic() + 12
+    pending = set(futures)
+    try:
+        while pending:
+            done, pending = wait(pending, timeout=max(0, deadline - time.monotonic()),
+                                 return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for future in done:
+                try:
+                    return future.result()
+                except Exception as exc:
+                    LOG.info("Поиск трека / быстрый %s: %s", futures[future], error_detail(exc))
+    finally:
+        for future in pending:
+            future.cancel()
     return download_track_local(query, directory, settings)
 
 
