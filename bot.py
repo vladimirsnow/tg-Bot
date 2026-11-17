@@ -18,7 +18,7 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageH
 
 from links import Link, links_in, music_query
 from media import (Attachment, MediaError, Post, download_post, download_track,
-                   download_track_local, materialize_remote)
+                   download_track_local, error_detail, materialize_remote)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -161,7 +161,7 @@ class MediaBot:
             try:
                 result = await self.load(loader, source, directory)
             except (MediaError, OSError, ValueError) as exc:
-                LOG.info("%s / %s", type(source).__name__, str(exc) if isinstance(exc, MediaError) else type(exc).__name__)
+                LOG.info("%s / %s", type(source).__name__, error_detail(exc))
                 await self.finish_status(bot, job.message, status, failure)
                 return
             except Exception as exc:
@@ -197,7 +197,7 @@ class MediaBot:
                         raise exc
                 except Exception as fallback_exc:
                     LOG.warning("%s / отправка: %s; резервный путь: %s", label,
-                                type(exc).__name__, type(fallback_exc).__name__)
+                                error_detail(exc), error_detail(fallback_exc))
                     await self.finish_status(bot, job.message, status, failure)
                     return
             LOG.info("%s / готово за %.1f с", label, asyncio.get_running_loop().time() - started)

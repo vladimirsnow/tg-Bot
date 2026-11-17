@@ -37,6 +37,14 @@ class MediaError(Exception):
     pass
 
 
+def error_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, MediaError):
+        return str(exc)[:120]
+    return type(exc).__name__
+
+
 @dataclass
 class Attachment:
     kind: str
@@ -249,7 +257,7 @@ def instagram_embed(client: httpx.Client, link: Link) -> list[Remote]:
 
 
 def tikwm(client: httpx.Client, link: Link) -> list[Remote]:
-    response = client.get("https://www.tikwm.com/api/", params={"url": link.url})
+    response = client.get("https://www.tikwm.com/api/", params={"url": link.url}, timeout=5)
     response.raise_for_status()
     data = response.json().get("data") or {}
     if images := data.get("images"):
@@ -353,7 +361,7 @@ def download_items(client: httpx.Client, platform: str, items: list[Remote], dir
                     attachment = as_audio(raw, directory / f"audio-{index}.mp3", item.title, item.artist)
                 (result.audio if item.kind == "audio" else result.visual).append(attachment)
             except (MediaError, httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as exc:
-                LOG.info("%s %s / загрузка: %s", platform, item.kind, type(exc).__name__)
+                LOG.info("%s %s / загрузка: %s", platform, item.kind, error_detail(exc))
                 result.incomplete = True
             finally:
                 raw.unlink(missing_ok=True)
@@ -416,11 +424,12 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
         }
         for index, provider in enumerate(providers[link.platform]):
             target = directory / f"provider-{index}"
-            target.mkdir()
+            target.mkdir(exist_ok=True)
             try:
                 provider_started = time.monotonic()
                 items = provider()
-                LOG.info("%s / поиск источника %s: %.1f с", link.platform, index + 1,
+                LOG.info("%s / источник %s вернул %s файлов за %.1f с", link.platform, index + 1,
+                         len(items),
                          time.monotonic() - provider_started)
                 post = download_items(client, link.platform, items, target, link.url, fast)
                 if not post.visual:
@@ -434,7 +443,7 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                 if not link.is_photo or photos:
                     return post
             except (MediaError, httpx.HTTPError, ValueError, KeyError, TypeError, OSError) as exc:
-                LOG.info("%s / источник %s: %s", link.platform, index + 1, type(exc).__name__)
+                LOG.info("%s / источник %s: %s", link.platform, index + 1, error_detail(exc))
     if photo_fallback:
         photo_fallback.incomplete = True
         return photo_fallback
