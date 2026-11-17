@@ -676,7 +676,7 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
     future = SEARCH_POOL.submit(search_audius, query, target, stop)
     futures[future] = "audius"
     cancelled[future] = stop
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 35
     pending = set(futures)
     try:
         while pending:
@@ -686,14 +686,16 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
                 break
             for future in done:
                 try:
-                    return future.result()
+                    result = future.result()
+                    LOG.info("Поиск трека / выбран %s: %s — %s", futures[future], result.artist, result.title)
+                    return result
                 except Exception as exc:
                     LOG.info("Поиск трека / быстрый %s: %s", futures[future], error_detail(exc))
     finally:
         for future in pending:
             cancelled[future].set()
             future.cancel()
-    raise MediaError("Источники музыки не выдали готовый трек за 30 секунд")
+    raise MediaError("Источники музыки не выдали готовый трек за 35 секунд")
 
 
 def track_remote(query: str, search: str, platform: str, media_format: str,
