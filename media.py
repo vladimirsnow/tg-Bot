@@ -578,8 +578,9 @@ def search_download(query, search, directory, cookies, stop):
         shutil.copyfile(cookies, cookie_copy)
         cookie_copy.chmod(0o600)
         options["cookiefile"] = str(cookie_copy)
-    results = extract(f"{search}3:{query}", options, download=False, timeout=12,
-                      cancel_event=stop, playlist=True)
+    count = 10 if search == "scsearch" else 5
+    results = extract(f"{search}{count}:{query}", options, download=False, timeout=12,
+                      cancel_event=stop, playlist=True, playlist_limit=count)
     for index, entry in enumerate(results.get("entries") or []):
         title = text(entry.get("track") or entry.get("title"))
         artist = text(entry.get("artist") or entry.get("uploader") or entry.get("channel"))
@@ -593,13 +594,13 @@ def search_download(query, search, directory, cookies, stop):
         target = directory / str(index)
         target.mkdir(exist_ok=True)
         try:
-            result = ytdlp(url, target, cookies, audio=True, timeout=20, cancel_event=stop)
+            result = ytdlp(url, target, cookies, audio=True, timeout=28, cancel_event=stop)
         except MediaError as exc:
             LOG.info("Поиск / кандидат недоступен целиком: %s", error_detail(exc))
             if stop.is_set():
                 raise
             continue
-        if track_matches(query, result.title, result.artist) or track_matches(query, title, artist):
+        if track_matches(query, result.title, result.artist):
             return result
     raise MediaError("Не найдено точное совпадение исполнителя и названия")
 
@@ -617,7 +618,7 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
         future = SEARCH_POOL.submit(search_download, query, search, target, cookies, stop)
         futures[future] = platform
         cancelled[future] = stop
-    deadline = time.monotonic() + 25
+    deadline = time.monotonic() + 30
     pending = set(futures)
     try:
         while pending:
@@ -634,7 +635,7 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
         for future in pending:
             cancelled[future].set()
             future.cancel()
-    raise MediaError("Источники музыки не выдали готовый трек за 25 секунд")
+    raise MediaError("Источники музыки не выдали готовый трек за 30 секунд")
 
 
 def track_remote(query: str, search: str, platform: str, media_format: str,

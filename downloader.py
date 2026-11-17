@@ -44,7 +44,7 @@ class QuietLogger:
 
 
 def extract(url, options=None, download=False, timeout=60, tiktok_data=None, cancel_event=None,
-            playlist=False):
+            playlist=False, playlist_limit=3):
     deadline = time.monotonic() + timeout
     logger = QuietLogger(deadline, cancel_event)
     logger.guard()
@@ -92,7 +92,7 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None, can
         if "entries" in info:
             if playlist:
                 from itertools import islice
-                info["entries"] = list(islice((entry for entry in info["entries"] if entry), 3))
+                info["entries"] = list(islice((entry for entry in info["entries"] if entry), playlist_limit))
             else:
                 info = next((entry for entry in info["entries"] if entry), None)
         if not info:

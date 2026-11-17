@@ -34,8 +34,8 @@ from runtime import WebhookRuntime
 from music_engine import MusicEngine
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.25"
-MUSIC_TIMEOUT = 35
+BUILD = "2026.11.17.26"
+MUSIC_TIMEOUT = 40
 MUSIC_STATE = ContextVar("music_state", default=None)
 
 
@@ -389,7 +389,7 @@ class MediaBot:
             try:
                 async with asyncio.timeout(5):
                     await self.finish_status(bot, job.message, state["status"],
-                        "Источник музыки не ответил за 35 секунд. Попробуй указать исполнителя и название точнее.")
+                        f"Источник музыки не ответил за {round(budget)} секунд. Попробуй указать исполнителя и название точнее.")
             except (TimeoutError, TelegramError):
                 pass
             return False
