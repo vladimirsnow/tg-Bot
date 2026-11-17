@@ -219,7 +219,8 @@ def gallery(link: Link, cookies: Path | None) -> list[Remote]:
         if link.platform == "instagram":
             if metadata.get("audio_url") == url:
                 kind = "audio"
-            elif metadata.get("video_url") == url:
+            elif (metadata.get("video_url") == url or metadata.get("extension") in {"mp4", "webm"}
+                  or urlsplit(url).path.lower().endswith((".mp4", ".webm"))):
                 kind = "video"
             else:
                 kind = "photo"
@@ -394,6 +395,22 @@ def materialize_remote(attachment: Attachment, directory: Path, index: int = 0) 
         raw.unlink(missing_ok=True)
 
 
+def recover_post(link: Link, directory: Path, settings: Settings) -> Post:
+    """Try a fresh extractor before repeating providers whose CDN URL failed."""
+    directory.mkdir(parents=True, exist_ok=True)
+    cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
+    if not link.is_photo:
+        native = directory / "native"
+        native.mkdir(exist_ok=True)
+        try:
+            return Post([ytdlp(link.url, native, cookies)])
+        except (MediaError, OSError, ValueError) as exc:
+            LOG.info("%s / прямой загрузчик: %s", link.platform, error_detail(exc))
+    providers = directory / "providers"
+    providers.mkdir(exist_ok=True)
+    return download_post(link, providers, settings, fast=False)
+
+
 def download_post(link: Link, directory: Path, settings: Settings, fast: bool = True) -> Post:
     cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
     photo_fallback = None
@@ -486,7 +503,7 @@ def track_remote(query: str, search: str, platform: str, media_format: str,
 def download_track_local(query: str, directory: Path, settings: Settings) -> Attachment:
     for name, cookies in (("ytsearch1", settings.youtube_cookies), ("scsearch1", None)):
         source = directory / name
-        source.mkdir()
+        source.mkdir(exist_ok=True)
         try:
             return ytdlp(f"{name}:{query}", source, cookies, audio=True)
         except (MediaError, OSError, ValueError) as exc:

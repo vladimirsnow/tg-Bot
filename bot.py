@@ -18,7 +18,7 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageH
 
 from links import Link, links_in, music_query
 from media import (Attachment, MediaError, Post, download_post, download_track,
-                   download_track_local, error_detail, materialize_remote)
+                   download_track_local, error_detail, materialize_remote, recover_post)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -60,7 +60,9 @@ class MediaBot:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=12)
+        self.music_queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=4)
         self.worker: asyncio.Task | None = None
+        self.music_worker: asyncio.Task | None = None
         self.trigger = settings.trigger
         self.username = ""
 
@@ -68,6 +70,7 @@ class MediaBot:
         self.username = app.bot.username
         self.trigger = self.trigger or f"@{self.username}"
         self.worker = asyncio.create_task(self.work(app.bot))
+        self.music_worker = asyncio.create_task(self.work(app.bot, self.music_queue))
         LOG.info("@%s запущен. Privacy Mode: %s", self.username,
                  "выключен" if app.bot.bot.can_read_all_group_messages else "включён")
         if not self.settings.chat_ids:
@@ -76,9 +79,10 @@ class MediaBot:
             LOG.info("Для настройки доступа в личке отправь боту /start и возьми ID из журнала.")
 
     async def stop(self, _: Application) -> None:
-        if self.worker:
-            self.worker.cancel()
-            await asyncio.gather(self.worker, return_exceptions=True)
+        workers = [worker for worker in (self.worker, self.music_worker) if worker]
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
     async def receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
@@ -119,14 +123,16 @@ class MediaBot:
         if query == "" and not jobs:
             await self.say(context.bot, message, f"Напиши название после {self.trigger}.")
         for job in jobs:
-            if self.queue.full():
+            queue = self.music_queue if job.track else self.queue
+            if queue.full():
                 await self.say(context.bot, message, "Очередь занята. Пришли запрос чуть позже.")
                 break
-            self.queue.put_nowait(job)
+            queue.put_nowait(job)
 
-    async def work(self, bot: Bot) -> None:
+    async def work(self, bot: Bot, queue: asyncio.Queue[Job] | None = None) -> None:
+        queue = self.queue if queue is None else queue
         while True:
-            job = await self.queue.get()
+            job = await queue.get()
             try:
                 await self.process(bot, job)
             except TelegramError as exc:
@@ -134,7 +140,7 @@ class MediaBot:
             except Exception as exc:
                 LOG.error("Очередь / ошибка: %s", type(exc).__name__)
             finally:
-                self.queue.task_done()
+                queue.task_done()
 
     async def process(self, bot: Bot, job: Job) -> None:
         with TemporaryDirectory(prefix="telegram-media-") as temporary:
@@ -189,9 +195,7 @@ class MediaBot:
                     elif job.link and simple_post:
                         LOG.info("%s / резервная обработка", label)
                         await self.edit_status(status, "⏳ Прямая ссылка не подошла, обрабатываю видео…")
-                        local = await self.load(
-                            lambda link, path, settings: download_post(link, path, settings, fast=False),
-                            job.link, directory)
+                        local = await self.load(recover_post, job.link, directory / "recovery")
                         await self.send_post(bot, job.message, local, directory)
                     else:
                         raise exc
@@ -295,19 +299,26 @@ class MediaBot:
         await self.send(upload)
 
     async def send_post(self, bot: Bot, message: Message, post: Post, directory: Path) -> None:
+        incomplete = post.incomplete
         for start in range(0, len(post.visual), 10):
             group = post.visual[start:start + 10]
             if len(group) == 1:
                 await self.send_single(bot, message, group[0], directory)
             else:
-                await self.send_album(bot, message, group, directory)
+                complete = await self.send_album(bot, message, group, directory)
+                incomplete = incomplete or not complete
         for attachment in post.audio:
-            await self.send_single(bot, message, attachment, directory)
-        if post.incomplete:
+            try:
+                await self.send_single(bot, message, attachment, directory)
+            except Exception as exc:
+                LOG.warning("Звук фотопоста / %s", error_detail(exc))
+                incomplete = True
+        if incomplete:
             await self.say(bot, message, "Часть медиа в этом посте недоступна или превышает лимит.")
 
     async def send_album(self, bot: Bot, message: Message, group: list[Attachment],
-                         directory: Path | None = None) -> None:
+                         directory: Path | None = None) -> bool:
+        complete = True
         if all(item.remote_url for item in group):
             media = []
             for item in group:
@@ -320,13 +331,24 @@ class MediaBot:
             try:
                 await self.send(lambda: bot.send_media_group(**self.destination(message), media=media,
                                                              read_timeout=60))
-                return
+                return True
             except (BadRequest, NetworkError) as exc:
                 if directory is None:
                     raise
                 LOG.info("Альбом / прямая отправка отклонена: %s; загружаю файлы", type(exc).__name__)
-                group = [await asyncio.to_thread(materialize_remote, item, directory, index)
-                         for index, item in enumerate(group)]
+                local = []
+                for index, item in enumerate(group):
+                    try:
+                        local.append(await asyncio.to_thread(materialize_remote, item, directory, index))
+                    except Exception as file_exc:
+                        LOG.warning("Альбом / файл %s: %s", index + 1, error_detail(file_exc))
+                        complete = False
+                if not local:
+                    raise MediaError("Не удалось загрузить файлы альбома")
+                group = local
+                if len(group) == 1:
+                    await self.send_single(bot, message, group[0], directory)
+                    return complete
         async def upload():
             with ExitStack() as stack:
                 album = []
@@ -342,6 +364,7 @@ class MediaBot:
                         album.append(InputMediaPhoto(file))
                 await bot.send_media_group(**self.destination(message), media=album, write_timeout=150)
         await self.send(upload)
+        return complete
 
 
 async def error_handler(_: object, context: ContextTypes.DEFAULT_TYPE) -> None:
