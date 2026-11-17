@@ -92,7 +92,10 @@ def run(args: list[str], timeout: int) -> str:
         error = result.stderr.lower()
         if any(item in error for item in ("sign in", "login", "cookies", "429", "403", "captcha")):
             raise MediaError(f"{args[0]}: источник ограничил доступ")
-        raise MediaError(f"{args[0]}: код {result.returncode}")
+        hint = next((line for line in reversed(result.stderr.splitlines())
+                     if line.lstrip().startswith("ERROR:")), "")
+        hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", hint)
+        raise MediaError(f"{args[0]}: {hint[:240] or f'код {result.returncode}'}")
     return result.stdout
 
 
@@ -292,6 +295,9 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
             "--no-playlist", "--no-progress", "--socket-timeout", "12", "--retries", "1",
             "--fragment-retries", "1", "--extractor-retries", "1", "--max-filesize", "100M",
             "--windows-filenames", "-o", str(directory / "download.%(ext)s")]
+    link = parse_link(url)
+    if link and link.platform in {"tiktok", "instagram"}:
+        args += ["--impersonate", "chrome"]
     if cookies:
         cookie_copy = directory / "session.txt"
         shutil.copyfile(cookies, cookie_copy)
