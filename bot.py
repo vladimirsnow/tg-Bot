@@ -32,7 +32,7 @@ from settings import Settings
 from runtime import WebhookRuntime
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.22"
+BUILD = "2026.11.17.23"
 
 
 class ProbeLog(logging.Handler):
@@ -300,6 +300,11 @@ class MediaBot:
                 await self.say(context.bot, message, "Очередь занята. Пришли запрос чуть позже.")
                 break
             queue.put_nowait(job)
+
+    async def receive_tracked(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.receive(update, context)
+        if HealthHandler.runtime:
+            HealthHandler.runtime.updates_processed += 1
 
     async def work(self, bot: Bot, queue: asyncio.Queue[Job] | None = None) -> None:
         queue = self.queue if queue is None else queue
@@ -641,7 +646,7 @@ def main() -> None:
         if public_url:
             builder = builder.updater(None)
         app = builder.build()
-        app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive))
+        app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive_tracked))
         app.add_error_handler(error_handler)
         HealthHandler.application = app
         if public_url:

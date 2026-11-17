@@ -30,6 +30,7 @@ class WebhookRuntime:
         self.keepalive_failed = 0
         self.last_keepalive = None
         self.updates_received = 0
+        self.updates_processed = 0
         self.duplicates = 0
         self.seen = OrderedDict()
         self.stopping = asyncio.Event()
@@ -39,7 +40,8 @@ class WebhookRuntime:
                 "uptime_seconds": round(time.time() - self.started_at),
                 "keepalive_ok": self.keepalive_ok, "keepalive_failed": self.keepalive_failed,
                 "last_keepalive": self.last_keepalive,
-                "updates_received": self.updates_received, "duplicate_updates": self.duplicates}
+                "updates_received": self.updates_received, "updates_processed": self.updates_processed,
+                "duplicate_updates": self.duplicates}
 
     async def accept(self, payload):
         if not self.ready or not self.application.running:
