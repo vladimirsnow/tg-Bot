@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import ExitStack
 from collections import OrderedDict
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from telegram import Bot, Chat, InputFile, InputMediaPhoto, InputMediaVideo, Message, MessageEntity
 from telegram import ReplyParameters, Update
@@ -27,9 +29,10 @@ from links import Link, links_in, music_query, parse_link
 from media import (Attachment, MediaError, Post, download_post, download_track,
                    download_track_local, error_detail, materialize_remote, recover_post, load_post, photo_audio)
 from settings import Settings
+from runtime import WebhookRuntime
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.21"
+BUILD = "2026.11.17.22"
 
 
 class ProbeLog(logging.Handler):
@@ -46,6 +49,7 @@ class ProbeLog(logging.Handler):
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+    runtime: WebhookRuntime | None = None
     application: Application | None = None
     media_bot = None
     loop = None
@@ -55,6 +59,9 @@ class HealthHandler(BaseHTTPRequestHandler):
     probe_lock = threading.Lock()
 
     def do_POST(self) -> None:
+        if self.path == "/telegram":
+            self.telegram_update()
+            return
         worker = self.media_bot
         if self.path not in ("/selftest", "/youtube-cookies") or worker is None:
             self.send_error(404)
@@ -116,6 +123,38 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"started\n")
 
+    def telegram_update(self) -> None:
+        runtime = self.runtime
+        if runtime is None:
+            self.send_error(404)
+            return
+        supplied = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(runtime.secret.encode(), supplied.encode()):
+            self.send_error(403)
+            return
+        if not runtime.ready or runtime.loop is None:
+            self.send_error(503)
+            return
+        future = None
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 < size <= 1048576:
+                raise ValueError()
+            payload = json.loads(self.rfile.read(size))
+            future = asyncio.run_coroutine_threadsafe(runtime.accept(payload), runtime.loop)
+            future.result(timeout=5)
+        except (ValueError, TypeError, KeyError):
+            self.send_error(400)
+            return
+        except (FutureTimeout, RuntimeError, asyncio.QueueFull):
+            if future:
+                future.cancel()
+            self.send_error(503)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
     def probe_authorized(self) -> bool:
         if self.media_bot is None:
             return False
@@ -138,16 +177,21 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload.encode())
             return
         if self.path == "/status":
-            payload = json.dumps({"build": BUILD,
+            state = {"build": BUILD,
                                   "selftest": HealthHandler.probe_result,
-                                  "application_running": bool(self.application and self.application.running)})
+                                  "application_running": bool(self.application and self.application.running)}
+            state.update(self.runtime.snapshot() if self.runtime else {"mode": "polling"})
+            payload = json.dumps(state)
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(payload.encode())
             return
-        if self.path not in ("/", "/health"):
+        if self.path not in ("/", "/health", "/keepalive"):
             self.send_error(404)
+            return
+        if self.runtime and not self.runtime.ready:
+            self.send_error(503)
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -586,15 +630,29 @@ def main() -> None:
         if not shutil.which("deno"):
             LOG.warning("Deno не найден. YouTube может не работать. В Docker Deno уже включён.")
         bot = MediaBot(settings)
-        app = (ApplicationBuilder().token(settings.token).connect_timeout(20).read_timeout(30)
-               .post_init(bot.start).post_stop(bot.stop).build())
+        public_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        if public_url:
+            parts = urlsplit(public_url)
+            if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+                raise ValueError("RENDER_EXTERNAL_URL должен быть публичным HTTPS-адресом сервиса.")
+        builder = (ApplicationBuilder().token(settings.token).connect_timeout(20).read_timeout(30)
+                   .update_queue(asyncio.Queue(maxsize=100))
+                   .post_init(bot.start).post_stop(bot.stop))
+        if public_url:
+            builder = builder.updater(None)
+        app = builder.build()
         app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive))
         app.add_error_handler(error_handler)
         HealthHandler.application = app
+        if public_url:
+            HealthHandler.runtime = WebhookRuntime(app, bot, public_url)
         LOG.info("Сборка %s / запускаю Telegram", BUILD)
         health_server = start_health_server()
         try:
-            app.run_polling(allowed_updates=["message"], timeout=25, bootstrap_retries=-1)
+            if HealthHandler.runtime:
+                asyncio.run(HealthHandler.runtime.run())
+            else:
+                app.run_polling(allowed_updates=["message"], timeout=25, bootstrap_retries=-1)
         finally:
             if health_server:
                 health_server.shutdown()
