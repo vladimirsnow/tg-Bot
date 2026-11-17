@@ -380,11 +380,13 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
         if info.get("is_live") or duration > (1200 if audio else 900):
             return "Media exceeds duration limit"
     options["match_filter"] = match
+    download_started = time.monotonic()
     try:
         info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info)
     except Exception as exc:
         hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
         raise MediaError(f"yt-dlp: {hint[:340]}") from None
+    LOG.info("Загрузчик / получение медиа завершено за %.1f с", time.monotonic() - download_started)
     source = next((path for path in directory.glob("download.*") if path.is_file()
                    and path.suffix.lower() in {".mp4", ".m4a", ".mp3", ".webm", ".ogg", ".opus", ".mkv", ".aac"}), None)
     if not source or not 0 < source.stat().st_size <= SOURCE_LIMIT:

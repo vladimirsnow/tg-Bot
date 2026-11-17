@@ -19,8 +19,13 @@ def warmup():
 
 
 class QuietLogger:
+    def __init__(self):
+        self.started = time.monotonic()
+
     def debug(self, message):
-        pass
+        if "Downloading" in message and any(part in message for part in ("webpage", "player", "API JSON", "m3u8")):
+            safe = re.sub(r"https?://\S+", "<hidden>", message)
+            LOG.info("Загрузчик / %.1f с: %s", time.monotonic() - self.started, safe[:220])
 
     def warning(self, message):
         safe = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", message)
@@ -37,6 +42,8 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
     def progress(data):
         if time.monotonic() > deadline:
             raise TimeoutError("Download deadline exceeded")
+        if data.get("status") == "finished":
+            LOG.info("Загрузчик / файл скачан за %.1f с", time.monotonic() - deadline + timeout)
 
     cache = Path(tempfile.gettempdir()) / "telegram-media-extractor-cache"
     cache.mkdir(mode=0o700, exist_ok=True)
