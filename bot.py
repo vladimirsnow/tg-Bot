@@ -2,6 +2,7 @@ import asyncio
 import json
 import hashlib
 import hmac
+import http.cookiejar
 import logging
 import os
 import re
@@ -9,11 +10,11 @@ import shutil
 import threading
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Awaitable, Callable
 
 from telegram import Bot, Chat, InputFile, InputMediaPhoto, InputMediaVideo, Message, MessageEntity
@@ -27,7 +28,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.15"
+BUILD = "2026.11.17.16"
 
 
 class ProbeLog(logging.Handler):
@@ -54,12 +55,36 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         worker = self.media_bot
-        if self.path != "/selftest" or worker is None:
+        if self.path not in ("/selftest", "/youtube-cookies") or worker is None:
             self.send_error(404)
             return
         if not self.probe_authorized():
             self.send_error(403)
             return
+        if self.path == "/youtube-cookies":
+            cookie_path = None
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 131072:
+                    raise ValueError()
+                data = self.rfile.read(size).decode()
+                with NamedTemporaryFile(mode="w", prefix="telegram-youtube-", suffix=".txt", delete=False) as handle:
+                    handle.write(data)
+                    cookie_path = Path(handle.name)
+                jar = http.cookiejar.MozillaCookieJar(str(cookie_path))
+                jar.load(ignore_discard=True, ignore_expires=False)
+                if not jar or any(c.domain.lstrip(".") not in {"youtube.com", "www.youtube.com", "music.youtube.com"}
+                                  for c in jar):
+                    raise ValueError()
+                worker.settings = replace(worker.settings, youtube_cookies=cookie_path)
+                self.send_response(204)
+                self.end_headers()
+                return
+            except Exception:
+                if cookie_path:
+                    cookie_path.unlink(missing_ok=True)
+                self.send_error(400)
+                return
         if not self.application or not self.application.running or not worker.settings.owner_user_id:
             self.send_error(503)
             return
