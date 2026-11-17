@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from bot import Job, MediaBot
 from music_engine import MusicEngine
 from settings import Settings
-from media import track_matches, ytdlp, search_audius, download_track, Attachment, MediaError
+from media import track_matches, artist_matches, ytdlp, search_audius, download_track, Attachment, MediaError
 from threading import Event
 
 
@@ -59,6 +59,8 @@ class MusicTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(track_matches("The end my chemical romance", "The End.", "My Chemical Romance"))
         self.assertFalse(track_matches("The end my chemical romance", "To the End", "My Chemical Romance"))
         self.assertTrue(track_matches("династия", "ДИНАСТИЯ", "VILLIAN & madk1d"))
+        self.assertTrue(artist_matches("My Chemical Romance", "My Chemical Romance - Topic"))
+        self.assertFalse(artist_matches("My Chemical Romance", "Mayor McLovin"))
 
     async def test_stuck_downloader_process_is_killed_on_timeout(self):
         engine = MusicEngine()

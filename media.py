@@ -569,6 +569,13 @@ def track_matches(query: str, title: str, artist: str = "") -> bool:
         query_words - title_words - artist_words - decoration)
 
 
+def artist_matches(expected: str, actual: str) -> bool:
+    words = lambda value: set(re.findall(r"\w+", value.casefold())) - {"topic", "official"}
+    wanted, found = words(expected), words(actual)
+    return bool(wanted) and (wanted <= found or
+        re.sub(r"\W+", "", expected.casefold()) == re.sub(r"\W+", "", actual.casefold()))
+
+
 def search_download(query, search, directory, cookies, stop):
     from downloader import extract, warmup
     options = {"extract_flat": True}
@@ -582,10 +589,21 @@ def search_download(query, search, directory, cookies, stop):
     count = 10 if search == "scsearch" else 5
     results = extract(f"{search}{count}:{query}", options, download=False, timeout=12,
                       cancel_event=stop, playlist=True, playlist_limit=count)
-    for index, entry in enumerate(results.get("entries") or []):
+    entries = results.get("entries") or []
+    query_words = set(re.findall(r"\w+", query.casefold()))
+    artist_hints = []
+    for entry in entries:
+        artist = text(entry.get("artist") or entry.get("uploader") or entry.get("channel"))
+        artist_words = set(re.findall(r"\w+", artist.casefold())) - {"topic", "official"}
+        if artist_words and artist_words < query_words:
+            artist_hints.append((len(artist_words), artist))
+    expected_artist = max(artist_hints, default=(0, ""))[1]
+    for index, entry in enumerate(entries):
         title = text(entry.get("track") or entry.get("title"))
         artist = text(entry.get("artist") or entry.get("uploader") or entry.get("channel"))
         if not track_matches(query, title, artist):
+            continue
+        if expected_artist and not artist_matches(expected_artist, artist):
             continue
         url = entry.get("webpage_url") or entry.get("url")
         if not url or not isinstance(url, str):
@@ -601,7 +619,8 @@ def search_download(query, search, directory, cookies, stop):
             if stop.is_set():
                 raise
             continue
-        if track_matches(query, result.title, result.artist):
+        if (track_matches(query, result.title, result.artist)
+                and (not expected_artist or artist_matches(expected_artist, result.artist))):
             return result
     raise MediaError("Не найдено точное совпадение исполнителя и названия")
 

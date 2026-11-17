@@ -34,7 +34,7 @@ from runtime import WebhookRuntime
 from music_engine import MusicEngine
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.27"
+BUILD = "2026.11.17.28"
 MUSIC_TIMEOUT = 40
 MUSIC_STATE = ContextVar("music_state", default=None)
 
