@@ -362,6 +362,9 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
         "bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
         "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
         "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/b")
+    if not audio and link and link.platform == "tiktok":
+        options["format"] = ("b[vcodec=h264][filesize<=?49M]/b[vcodec^=avc1][filesize<=?49M]/"
+                             "b[vcodec=h264]/b[vcodec^=avc1]/b[ext=mp4]/b")
     def match(info, *, incomplete=False):
         duration = info.get("duration") or 0
         if info.get("is_live") or duration > (1200 if audio else 900):
