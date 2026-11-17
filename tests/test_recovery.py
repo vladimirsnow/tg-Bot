@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import httpx
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,7 +11,7 @@ from telegram.error import BadRequest
 
 from bot import Job, MediaBot
 from links import parse_link
-from media import Attachment, MediaError, Post, gallery, recover_post
+from media import Attachment, MediaError, Post, gallery, recover_post, load_post, download_post, Remote
 from settings import Settings
 
 
@@ -18,6 +19,25 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_extraction_failure_also_starts_recovery(self):
+        link = parse_link("https://vt.tiktok.com/ZSpGEBawN/")
+        expected = Post([Attachment("video", Path("/tmp/video.mp4"))])
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("media.download_post", side_effect=MediaError("CDN 403")), \
+                 patch("media.recover_post", return_value=expected) as recovery:
+                self.assertIs(load_post(link, Path(temporary), SETTINGS), expected)
+                self.assertEqual(recovery.call_args.args[1], Path(temporary) / "extraction-recovery")
+
+    def test_tiktok_downloader_runs_when_tikwm_times_out(self):
+        link = parse_link("https://vt.tiktok.com/ZSpGEBawN/")
+        expected = Attachment("video", Path("/tmp/video.mp4"))
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("media.tikwm", side_effect=httpx.ReadTimeout("API timeout")), \
+                 patch("media.gallery", return_value=[Remote("video", "https://v16.tiktok.com/clip.mp4")]), \
+                 patch("media.ytdlp", return_value=expected) as native:
+                self.assertEqual(download_post(link, Path(temporary), SETTINGS).visual, [expected])
+                self.assertEqual(native.call_args.kwargs, {"timeout": 45})
+
     def test_recovery_uses_fresh_directory_and_native_downloader(self):
         link = parse_link("https://vt.tiktok.com/ZSpGEBawN/")
         with tempfile.TemporaryDirectory() as temporary:

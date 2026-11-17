@@ -285,7 +285,8 @@ def twitter(client: httpx.Client, link: Link) -> list[Remote]:
             for item in items if item.get("url") and item.get("type") in {"photo", "video", "gif"}]
 
 
-def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False) -> Attachment:
+def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
+          timeout: int = 90) -> Attachment:
     args = ["yt-dlp", "--ignore-config", "--no-cache-dir", "--use-extractors", "default,-generic",
             "--compat-options", "no-certifi",
             "--no-playlist", "--no-progress", "--socket-timeout", "12", "--retries", "1",
@@ -306,7 +307,7 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False) 
                           "b[height<=480][ext=mp4]/bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
                           "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
                           "b[ext=mp4]/b[height<=720]/b"]
-    output = run([*args, "--", url], 145)
+    output = run([*args, "--", url], timeout)
     source = next((path for path in directory.glob("download.*") if path.is_file()
                    and path.suffix.lower() in {".mp4", ".m4a", ".mp3", ".webm", ".ogg", ".opus", ".mkv", ".aac"}), None)
     if not source or source.stat().st_size > SOURCE_LIMIT:
@@ -411,6 +412,15 @@ def recover_post(link: Link, directory: Path, settings: Settings) -> Post:
     return download_post(link, providers, settings, fast=False)
 
 
+def load_post(link: Link, directory: Path, settings: Settings) -> Post:
+    """Recovery also covers extraction failures, before any media was sent."""
+    try:
+        return download_post(link, directory, settings)
+    except (MediaError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("%s / первый путь: %s; запускаю резервный", link.platform, error_detail(exc))
+        return recover_post(link, directory / "extraction-recovery", settings)
+
+
 def download_post(link: Link, directory: Path, settings: Settings, fast: bool = True) -> Post:
     cookies = {"youtube": settings.youtube_cookies, "instagram": settings.instagram_cookies}.get(link.platform)
     photo_fallback = None
@@ -451,6 +461,16 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                 post = download_items(client, link.platform, items, target, link.url, fast)
                 if not post.visual:
                     continue
+                if (fast and link.platform == "tiktok" and index == 1
+                        and len(post.visual) == 1 and post.visual[0].kind == "video"):
+                    # TikTok CDN links often require the extractor's headers and
+                    # cookies, which Telegram's remote fetch cannot provide.
+                    native = directory / "tiktok-native"
+                    native.mkdir(exist_ok=True)
+                    try:
+                        return Post([ytdlp(link.url, native, None, timeout=45)])
+                    except (MediaError, OSError, ValueError) as exc:
+                        LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 photos = [item for item in post.visual if item.kind == "photo"]
                 if photo_fallback and not photos:
                     continue

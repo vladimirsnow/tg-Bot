@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -18,14 +19,25 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageH
 
 from links import Link, links_in, music_query
 from media import (Attachment, MediaError, Post, download_post, download_track,
-                   download_track_local, error_detail, materialize_remote, recover_post)
+                   download_track_local, error_detail, materialize_remote, recover_post, load_post)
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
+BUILD = "2026.11.17.3"
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+    application: Application | None = None
+
     def do_GET(self) -> None:
+        if self.path == "/status":
+            payload = json.dumps({"build": BUILD,
+                                  "application_running": bool(self.application and self.application.running)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+            return
         if self.path not in ("/", "/health"):
             self.send_error(404)
             return
@@ -152,7 +164,7 @@ class MediaBot:
                         "twitter": "X / Twitter"}[job.link.platform]
                 label = name
                 failure = f"Не удалось получить медиа из {name}. Возможно, пост удалён, закрыт или сайт ограничил доступ."
-                loader = download_post
+                loader = load_post
                 source = job.link
             else:
                 label = "Поиск трека"
@@ -390,6 +402,8 @@ def main() -> None:
                .post_init(bot.start).post_stop(bot.stop).build())
         app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, bot.receive))
         app.add_error_handler(error_handler)
+        HealthHandler.application = app
+        LOG.info("Сборка %s / запускаю Telegram", BUILD)
         health_server = start_health_server()
         try:
             app.run_polling(allowed_updates=["message"], timeout=25, bootstrap_retries=-1)
