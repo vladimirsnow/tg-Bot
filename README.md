@@ -36,6 +36,10 @@ sudo docker compose logs -f --tail 30 bot
 2. Создай проект Sandbox и один [Combined Service](https://northflank.com/docs/v1/application/getting-started/build-and-deploy-your-code). Выбери репозиторий, Dockerfile из корня и один экземпляр. Публичные порты не нужны.
 3. Перенеси значения из `.env` в **Runtime Environment Variables**. `TELEGRAM_BOT_TOKEN` храни как секретную переменную. После изменения переменных проверь, что сервис перезапустился.
 
+### Render Free с автоматическим пробуждением
+
+Бесплатный Render засыпает после 15 минут без входящих запросов. В этом репозитории есть GitHub Actions workflow, который обращается к `/health` каждые 10 минут и ждёт ответа при холодном старте. В GitHub открой **Settings → Secrets and variables → Actions → Variables → New repository variable** и добавь `RENDER_SERVICE_URL` со значением публичного адреса Render, например `https://имя-сервиса.onrender.com` (без `/health`). Workflow не использует токен бота. Расписание GitHub Actions может задерживаться, а Render может перезапустить бесплатный сервис, поэтому непрерывная работа не гарантируется. Одна постоянно работающая служба использует до 744 из 750 бесплатных часов Render в месяце из 31 дня.
+
 ## 3. Разреши группу и личку
 
 1. Отправь `/chatid@имя_бота` в своей группе и скопируй отрицательный ID из ответа. Запиши его в `ALLOWED_CHAT_IDS`.
