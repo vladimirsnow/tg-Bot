@@ -54,7 +54,11 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
     with yt_dlp.YoutubeDL(params) as ydl:
         if tiktok_data:
             from yt_dlp.extractor.tiktok import TikTokIE
-            parsed = TikTokIE(ydl)._parse_aweme_video_web(tiktok_data, url, str(tiktok_data["id"]))
+            for cookie in tiktok_data.get("__tiktok_cookies", ()):
+                ydl.cookiejar.set_cookie(cookie)
+            author = (tiktok_data.get("author") or {}).get("uniqueId") or tiktok_data.get("user")
+            canonical = f"https://www.tiktok.com/@{author}/video/{tiktok_data['id']}" if author else url
+            parsed = TikTokIE(ydl)._parse_aweme_video_web(tiktok_data, canonical, str(tiktok_data["id"]))
             info = ydl.process_ie_result(parsed, download=download)
         else:
             info = ydl.extract_info(url, download=download)

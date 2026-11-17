@@ -241,6 +241,10 @@ def tiktok_rows(url: str, depth: int = 0):
                 if child and child.platform == "tiktok":
                     yield from tiktok_rows(child.url, depth + 1)
             else:
+                if row[0] == 3:
+                    metadata = deepcopy(row[2])
+                    metadata["__tiktok_cookies"] = tuple(source.session.cookies)
+                    row = (row[0], row[1], metadata)
                 yield row
     finally:
         source.session.close()
