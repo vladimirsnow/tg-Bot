@@ -58,7 +58,7 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
     }
     params.update(options or {})
     if params.get("cookiefile") and "extractor_args" not in params:
-        params["extractor_args"] = {"youtube": {"player_client": ["web_safari"]}}
+        params["extractor_args"] = {"youtube": {"player_client": ["web"]}}
     if (url.startswith(("https://www.youtube.com/", "https://youtube.com/", "ytsearch"))
             and not params.get("cookiefile") and "extractor_args" not in params):
         params["extractor_args"] = {"youtube": {
