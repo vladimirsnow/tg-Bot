@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -26,7 +27,20 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.4"
+BUILD = "2026.11.17.5"
+
+
+class ProbeLog(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        if "OWNER_USER_ID" in record.getMessage():
+            return
+        line = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", record.getMessage())
+        self.lines.append(line[:240])
+        self.lines[:] = self.lines[-40:]
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -35,6 +49,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     loop = None
     probe_future = None
     probe_result = "not_run"
+    probe_logs = []
     probe_lock = threading.Lock()
 
     def do_POST(self) -> None:
@@ -42,11 +57,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path != "/selftest" or worker is None:
             self.send_error(404)
             return
-        stamp = self.headers.get("X-Bot-Probe-Time", "")
-        signature = self.headers.get("X-Bot-Probe-Signature", "")
-        expected = hmac.new(worker.settings.token.encode(), stamp.encode(), hashlib.sha256).hexdigest()
-        valid_time = stamp.isdecimal() and len(stamp) <= 12 and abs(time.time() - int(stamp)) <= 60
-        if not valid_time or not hmac.compare_digest(expected, signature):
+        if not self.probe_authorized():
             self.send_error(403)
             return
         if not self.application or not self.application.running or not worker.settings.owner_user_id:
@@ -57,12 +68,33 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.send_error(409)
                 return
             HealthHandler.probe_result = "running"
+            HealthHandler.probe_logs = []
             HealthHandler.probe_future = asyncio.run_coroutine_threadsafe(worker.selftest(), self.loop)
         self.send_response(202)
         self.end_headers()
         self.wfile.write(b"started\n")
 
+    def probe_authorized(self) -> bool:
+        if self.media_bot is None:
+            return False
+        stamp = self.headers.get("X-Bot-Probe-Time", "")
+        signature = self.headers.get("X-Bot-Probe-Signature", "")
+        expected = hmac.new(self.media_bot.settings.token.encode(), stamp.encode(), hashlib.sha256).hexdigest()
+        valid_time = stamp.isdecimal() and len(stamp) <= 12 and abs(time.time() - int(stamp)) <= 60
+        return valid_time and hmac.compare_digest(expected, signature)
+
     def do_GET(self) -> None:
+        if self.path == "/selftest":
+            if not self.probe_authorized():
+                self.send_error(403)
+                return
+            payload = json.dumps({"result": HealthHandler.probe_result, "logs": HealthHandler.probe_logs},
+                                 ensure_ascii=False)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+            return
         if self.path == "/status":
             payload = json.dumps({"build": BUILD,
                                   "selftest": HealthHandler.probe_result,
@@ -194,6 +226,10 @@ class MediaBot:
                 queue.task_done()
 
     async def selftest(self) -> None:
+        trace = ProbeLog()
+        loggers = (LOG, logging.getLogger("media"))
+        for logger in loggers:
+            logger.addHandler(trace)
         try:
             bot = HealthHandler.application.bot
             message = await bot.send_message(chat_id=self.settings.owner_user_id,
@@ -203,6 +239,10 @@ class MediaBot:
         except Exception as exc:
             LOG.warning("Проверка Render / %s", error_detail(exc))
             HealthHandler.probe_result = "failed"
+        finally:
+            for logger in loggers:
+                logger.removeHandler(trace)
+            HealthHandler.probe_logs = trace.lines
 
     async def process(self, bot: Bot, job: Job) -> bool:
         with TemporaryDirectory(prefix="telegram-media-") as temporary:
