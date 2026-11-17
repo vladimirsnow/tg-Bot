@@ -1,5 +1,6 @@
 """Reuse yt-dlp imports across requests instead of restarting Python per job."""
 import logging
+import re
 import time
 
 LOG = logging.getLogger(__name__)
@@ -20,13 +21,14 @@ class QuietLogger:
         pass
 
     def warning(self, message):
-        pass
+        safe = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", message)
+        LOG.info("Загрузчик / %s", safe[:350])
 
     def error(self, message):
         pass
 
 
-def extract(url, options=None, download=False, timeout=60):
+def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
     yt_dlp, _ = warmup()
     deadline = time.monotonic() + timeout
 
@@ -46,11 +48,16 @@ def extract(url, options=None, download=False, timeout=60):
     if (url.startswith(("https://www.youtube.com/", "https://youtube.com/", "ytsearch"))
             and not params.get("cookiefile") and "extractor_args" not in params):
         params["extractor_args"] = {"youtube": {
-            "player_client": ["android_vr"],
+            "player_client": ["visionos"],
             "innertube_host": ["youtubei.googleapis.com"],
         }}
     with yt_dlp.YoutubeDL(params) as ydl:
-        info = ydl.extract_info(url, download=download)
+        if tiktok_data:
+            from yt_dlp.extractor.tiktok import TikTokIE
+            parsed = TikTokIE(ydl)._parse_aweme_video_web(tiktok_data, url, str(tiktok_data["id"]))
+            info = ydl.process_ie_result(parsed, download=download)
+        else:
+            info = ydl.extract_info(url, download=download)
         if not info:
             raise ValueError("No media returned")
         if "entries" in info:

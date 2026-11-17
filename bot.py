@@ -27,7 +27,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.12"
+BUILD = "2026.11.17.13"
 
 
 class ProbeLog(logging.Handler):
@@ -246,7 +246,7 @@ class MediaBot:
     async def selftest(self, link: Link | None = None, query: str | None = None) -> None:
         trace = ProbeLog()
         HealthHandler.probe_logs = trace.lines
-        loggers = (LOG, logging.getLogger("media"))
+        loggers = (LOG, logging.getLogger("media"), logging.getLogger("downloader"))
         for logger in loggers:
             logger.addHandler(trace)
         try:

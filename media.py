@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
@@ -59,6 +60,7 @@ class Attachment:
     remote_url: str | None = None
     platform: str | None = None
     referer: str = ""
+    native_info: dict | None = None
 
 
 @dataclass
@@ -75,6 +77,7 @@ class Remote:
     url: str
     title: str = ""
     artist: str = ""
+    native_info: dict | None = None
 
 
 def text(value) -> str:
@@ -273,6 +276,8 @@ def gallery(link: Link, cookies: Path | None) -> list[Remote]:
             if kind:
                 music = metadata.get("music") or {}
                 result.append(Remote(kind, url, text(music.get("title")), text(music.get("authorName"))))
+                if kind == "video":
+                    result[-1] = Remote(kind, url, native_info=deepcopy(metadata))
     return result
 
 
@@ -343,7 +348,7 @@ def twitter(client: httpx.Client, link: Link) -> list[Remote]:
 
 
 def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
-          timeout: int = 90) -> Attachment:
+          timeout: int = 90, native_info: dict | None = None) -> Attachment:
     from downloader import extract, warmup
     _, target_type = warmup()
     options = {"outtmpl": str(directory / "download.%(ext)s"),
@@ -371,7 +376,7 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
             return "Media exceeds duration limit"
     options["match_filter"] = match
     try:
-        info = extract(url, options, download=True, timeout=timeout)
+        info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info)
     except Exception as exc:
         hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
         raise MediaError(f"yt-dlp: {hint[:340]}") from None
@@ -425,7 +430,8 @@ def download_items(client: httpx.Client, platform: str, items: list[Remote], dir
                 raw.unlink(missing_ok=True)
             continue
         attachment = Attachment(item.kind, None, title=item.title, artist=item.artist,
-                                remote_url=item.url, platform=platform, referer=referer)
+                                remote_url=item.url, platform=platform, referer=referer,
+                                native_info=item.native_info)
         (result.audio if item.kind == "audio" else result.visual).append(attachment)
     return result
 
@@ -522,7 +528,8 @@ def download_post(link: Link, directory: Path, settings: Settings, fast: bool = 
                     native = directory / "tiktok-native"
                     native.mkdir(exist_ok=True)
                     try:
-                        return Post([ytdlp(link.url, native, None, timeout=45)])
+                        return Post([ytdlp(link.url, native, None, timeout=45,
+                                           native_info=post.visual[0].native_info)])
                     except (MediaError, OSError, ValueError) as exc:
                         LOG.info("TikTok / загрузка с заголовками: %s", error_detail(exc))
                 if not link.is_photo or photos:

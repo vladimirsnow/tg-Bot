@@ -51,7 +51,7 @@ class RecoveryTests(unittest.TestCase):
                  patch("media.gallery", return_value=[Remote("video", "https://v16.tiktok.com/clip.mp4")]), \
                  patch("media.ytdlp", return_value=expected) as native:
                 self.assertEqual(download_post(link, Path(temporary), SETTINGS).visual, [expected])
-                self.assertEqual(native.call_args.kwargs, {"timeout": 45})
+                self.assertEqual(native.call_args.kwargs, {"timeout": 45, "native_info": None})
 
     def test_photo_and_music_from_same_source_do_not_wait_for_another_provider(self):
         link = parse_link("https://www.tiktok.com/@example/photo/7708309252607151361")
