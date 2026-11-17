@@ -53,11 +53,12 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None):
         "socket_timeout": 6, "retries": 0, "fragment_retries": 0,
         "source_address": "0.0.0.0",
         "extractor_retries": 0, "compat_opts": {"no-certifi"},
+        "concurrent_fragment_downloads": 4,
         "js_runtimes": {"deno": {}}, "progress_hooks": [progress],
     }
     params.update(options or {})
     if params.get("cookiefile") and "extractor_args" not in params:
-        params["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+        params["extractor_args"] = {"youtube": {"player_client": ["web_safari"]}}
     if (url.startswith(("https://www.youtube.com/", "https://youtube.com/", "ytsearch"))
             and not params.get("cookiefile") and "extractor_args" not in params):
         params["extractor_args"] = {"youtube": {
