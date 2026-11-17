@@ -41,7 +41,7 @@ def error_detail(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code}"
     if isinstance(exc, MediaError):
-        return str(exc)[:120]
+        return str(exc)[:360]
     return type(exc).__name__
 
 
@@ -348,7 +348,7 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
                "max_filesize": SOURCE_LIMIT, "windowsfilenames": True,
                "merge_output_format": "mp4"}
     link = parse_link(url)
-    if link and link.platform in {"tiktok", "instagram"}:
+    if link and link.platform in {"tiktok", "instagram", "youtube"}:
         options["impersonate"] = target_type.from_str("chrome")
     if cookies:
         cookie_copy = directory / "session.txt"
@@ -369,7 +369,7 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
         info = extract(url, options, download=True, timeout=timeout)
     except Exception as exc:
         hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
-        raise MediaError(f"yt-dlp: {hint[:180]}") from None
+        raise MediaError(f"yt-dlp: {hint[:340]}") from None
     source = next((path for path in directory.glob("download.*") if path.is_file()
                    and path.suffix.lower() in {".mp4", ".m4a", ".mp3", ".webm", ".ogg", ".opus", ".mkv", ".aac"}), None)
     if not source or not 0 < source.stat().st_size <= SOURCE_LIMIT:
@@ -546,8 +546,10 @@ def download_track(query: str, directory: Path, settings: Settings) -> Attachmen
 
 def track_remote(query: str, search: str, platform: str, media_format: str,
                  cookies: Path | None) -> Attachment:
-    from downloader import extract
+    from downloader import extract, warmup
     options = {"format": media_format}
+    if platform == "youtube":
+        options["impersonate"] = warmup()[1].from_str("chrome")
     if platform == "youtube" and cookies:
         options["cookiefile"] = str(cookies)
     try:

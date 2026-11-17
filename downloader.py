@@ -38,6 +38,7 @@ def extract(url, options=None, download=False, timeout=60):
         "quiet": True, "no_warnings": True, "noprogress": True,
         "logger": QuietLogger(), "cachedir": False, "noplaylist": True,
         "socket_timeout": 6, "retries": 0, "fragment_retries": 0,
+        "source_address": "0.0.0.0",
         "extractor_retries": 0, "compat_opts": {"no-certifi"},
         "js_runtimes": {"deno": {}}, "progress_hooks": [progress],
     }

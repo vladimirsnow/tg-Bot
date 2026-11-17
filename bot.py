@@ -27,7 +27,7 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.8"
+BUILD = "2026.11.17.9"
 
 
 class ProbeLog(logging.Handler):
@@ -39,7 +39,7 @@ class ProbeLog(logging.Handler):
         if "OWNER_USER_ID" in record.getMessage():
             return
         line = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", record.getMessage())
-        self.lines.append(line[:240])
+        self.lines.append(line[:400])
         self.lines[:] = self.lines[-40:]
 
 
