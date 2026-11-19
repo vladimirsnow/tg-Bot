@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from bot import Job, MediaBot
 from music_engine import MusicEngine
 from settings import Settings
-from media import track_matches, artist_matches, ytdlp, search_audius, download_track, Attachment, MediaError
+from media import track_matches, artist_matches, ytdlp, search_audius, download_track, as_audio, Attachment, MediaError
 from threading import Event
 
 
@@ -19,6 +19,20 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class MusicTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    def test_known_aac_stream_is_copied_without_another_probe_or_transcode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "video.mp4"
+            source.write_bytes(b"source")
+            def remux(command, timeout):
+                self.assertEqual(command[0], "ffmpeg")
+                self.assertIn("copy", command)
+                Path(command[-1]).write_bytes(b"audio")
+            with patch("media.run", side_effect=remux) as execute:
+                result = as_audio(source, root / "track.mp3", codec_hint="mp4a.40.2")
+            self.assertEqual(result.path.suffix, ".m4a")
+            self.assertEqual(execute.call_count, 1)
+
     def test_audius_rejects_paid_or_gated_audio(self):
         response = httpx.Response(200, request=httpx.Request("GET", "https://api.audius.co/search"),
             json={"data": [{"id": "abc", "title": "Song", "user": {"name": "Artist"},

@@ -162,11 +162,13 @@ def as_photo(source: Path, target: Path) -> Attachment:
     return Attachment("photo", target)
 
 
-def as_audio(source: Path, target: Path, title: str = "", artist: str = "") -> Attachment:
-    probe = json.loads(run(["ffprobe", "-v", "error", "-select_streams", "a:0",
-                            "-show_entries", "stream=codec_name", "-of", "json", str(source)], 10))
-    streams = probe.get("streams") or []
-    codec = streams[0].get("codec_name") if streams else None
+def as_audio(source: Path, target: Path, title: str = "", artist: str = "", codec_hint: str = "") -> Attachment:
+    codec = "aac" if codec_hint.startswith("mp4a.") else codec_hint
+    if codec not in {"mp3", "aac"}:
+        probe = json.loads(run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                                "-show_entries", "stream=codec_name", "-of", "json", str(source)], 10))
+        streams = probe.get("streams") or []
+        codec = streams[0].get("codec_name") if streams else None
     if codec in {"mp3", "aac"} and source.stat().st_size <= UPLOAD_LIMIT:
         target = target.with_suffix(".mp3" if codec == "mp3" else ".m4a")
         run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(source),
@@ -421,7 +423,10 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
         artist = text(info.get("artist") or info.get("creator") or info.get("uploader"))
         if source.suffix.lower() in {".m4a", ".mp3"} and source.stat().st_size <= UPLOAD_LIMIT:
             return Attachment("audio", source, title, artist)
-        return as_audio(source, directory / "track.mp3", title, artist)
+        prepared = as_audio(source, directory / "track.mp3", title, artist,
+                            codec_hint=text(info.get("acodec")))
+        LOG.info("Загрузчик / аудио подготовлено за %.1f с", time.monotonic() - download_started)
+        return prepared
     return as_video(source, directory / "video.mp4")
 
 
