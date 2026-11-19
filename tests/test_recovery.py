@@ -26,6 +26,26 @@ SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_youtube_session_without_web_formats_uses_one_bounded_alternative(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "download.mp4").write_bytes(b"video")
+            cookies = root / "cookies.txt"
+            cookies.write_text("cookies")
+            expected = Attachment("video", root / "video.mp4")
+            with patch("downloader.extract", side_effect=[ValueError("Requested format is not available"), {}]) as backend, \
+                 patch("media.as_video", return_value=expected):
+                self.assertIs(ytdlp("https://youtube.com/shorts/v2M26i19fvI", root, cookies, timeout=20), expected)
+                self.assertEqual(backend.call_count, 2)
+                self.assertEqual(backend.call_args.args[1]["extractor_args"]["youtube"]["player_client"], ["web_creator"])
+                self.assertLessEqual(backend.call_args.kwargs["timeout"], 20)
+
+    def test_invalid_youtube_session_does_not_repeat_with_another_client(self):
+        with tempfile.TemporaryDirectory() as folder, patch("downloader.extract", side_effect=DownloadFailure("youtube_cookies_expired")) as backend:
+            with self.assertRaisesRegex(MediaError, "сессия аккаунта"):
+                ytdlp("https://youtube.com/shorts/v2M26i19fvI", Path(folder), Path(folder) / "cookies.txt")
+            self.assertEqual(backend.call_count, 1)
+
     def test_expired_youtube_session_is_not_reported_as_missing_video(self):
         def fail(url, download=False):
             backend.call_args.args[0]["logger"].warning("The provided YouTube account cookies are no longer valid.")

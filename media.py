@@ -365,10 +365,13 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
     if link and link.platform in {"tiktok", "instagram", "youtube"}:
         options["impersonate"] = target_type.from_str("chrome")
     if cookies:
-        cookie_copy = directory / "session.txt"
-        shutil.copyfile(cookies, cookie_copy)
-        cookie_copy.chmod(0o600)
-        options["cookiefile"] = str(cookie_copy)
+        if (link and link.platform == "youtube") or url.startswith("ytsearch"):
+            options["cookiefile"] = str(cookies)
+        else:
+            cookie_copy = directory / "session.txt"
+            shutil.copyfile(cookies, cookie_copy)
+            cookie_copy.chmod(0o600)
+            options["cookiefile"] = str(cookie_copy)
     options["format"] = ("bestaudio[ext=m4a][format_id!*=preview]/bestaudio[ext=mp3][format_id!*=preview]/"
         "bestaudio[format_id!*=preview]/best[format_id!*=preview]" if audio else
         "b[height<=480][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
@@ -385,8 +388,22 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
     options["match_filter"] = match
     download_started = time.monotonic()
     try:
-        info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info,
-                       cancel_event=cancel_event)
+        try:
+            info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info,
+                           cancel_event=cancel_event)
+        except DownloadFailure:
+            raise
+        except Exception as first:
+            remaining = timeout - (time.monotonic() - download_started)
+            if not (link and link.platform == "youtube" and cookies and remaining > 1
+                    and "Requested format is not available" in str(first)):
+                raise
+            # Some signed-in sessions only receive SABR from the web client.
+            # Try one cookie-capable client, preserving the original deadline.
+            LOG.info("YouTube / web не выдал поток; проверяю web_creator")
+            options["extractor_args"] = {"youtube": {"player_client": ["web_creator"]}}
+            info = extract(url, options, download=True, timeout=remaining,
+                           cancel_event=cancel_event)
     except DownloadFailure as exc:
         if exc.reason == "youtube_cookies_expired":
             raise MediaError("YouTube: сохранённая сессия аккаунта больше недействительна. Владельцу нужно обновить cookies в настройках бота.") from None
@@ -586,10 +603,7 @@ def search_download(query, search, directory, cookies, stop):
     if search == "ytsearch":
         options["impersonate"] = warmup()[1].from_str("chrome")
     if cookies:
-        cookie_copy = directory / "lookup-session.txt"
-        shutil.copyfile(cookies, cookie_copy)
-        cookie_copy.chmod(0o600)
-        options["cookiefile"] = str(cookie_copy)
+        options["cookiefile"] = str(cookies)
     count = 10 if search == "scsearch" else 5
     results = extract(f"{search}{count}:{query}", options, download=False, timeout=12,
                       cancel_event=stop, playlist=True, playlist_limit=count)

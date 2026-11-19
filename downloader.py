@@ -4,7 +4,11 @@ import os
 import re
 import time
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from youtube_session import session_copy
 
 LOG = logging.getLogger(__name__)
 
@@ -88,7 +92,14 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None, can
             "player_client": ["visionos"],
             "innertube_host": ["youtubei.googleapis.com"],
         }}
-    with yt_dlp.YoutubeDL(params) as ydl:
+    with ExitStack() as stack:
+        is_youtube = url.startswith("ytsearch") or urlsplit(url).hostname in {
+            "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"}
+        if is_youtube and params.get("cookiefile"):
+            params["cookiefile"] = stack.enter_context(session_copy(
+                params["cookiefile"], lambda: logger.failure_reason != "youtube_cookies_expired"))
+        # Register this after session_copy so yt-dlp saves response cookies first.
+        ydl = stack.enter_context(yt_dlp.YoutubeDL(params))
         try:
             if tiktok_data:
                 from yt_dlp.extractor.tiktok import TikTokIE

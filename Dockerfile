@@ -12,6 +12,6 @@ COPY --from=deno /usr/bin/deno /usr/local/bin/deno
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py links.py media.py settings.py downloader.py runtime.py music_engine.py music_worker.py allowed_chats.json ./
+COPY bot.py links.py media.py settings.py downloader.py runtime.py music_engine.py music_worker.py youtube_session.py allowed_chats.json ./
 USER bot
 CMD ["python", "bot.py"]

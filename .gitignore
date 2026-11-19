@@ -3,6 +3,7 @@
 !.env.example
 cookies/
 *cookies*.txt
+*cookies*.txt.lock
 .venv/
 __pycache__/
 *.py[cod]
