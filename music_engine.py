@@ -30,6 +30,7 @@ class MusicEngine:
             return
         env = {key: value for key, value in os.environ.items()
                if key not in {"TELEGRAM_BOT_TOKEN", "YOUTUBE_COOKIES_BASE64"}}
+        env["MEDIA_MUSIC_WORKER"] = "1"
         self.process = await asyncio.create_subprocess_exec(
             sys.executable, str(Path(__file__).with_name("music_worker.py")),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

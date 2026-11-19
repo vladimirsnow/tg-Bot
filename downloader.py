@@ -1,5 +1,6 @@
 """Reuse yt-dlp imports across requests instead of restarting Python per job."""
 import logging
+import os
 import re
 import time
 import tempfile
@@ -18,9 +19,10 @@ def warmup():
     import yt_dlp
     from yt_dlp.networking.impersonate import ImpersonateTarget
     from yt_dlp.extractor.youtube import YoutubeIE, YoutubeSearchIE
-    from yt_dlp.extractor.tiktok import TikTokIE
     from yt_dlp.extractor.soundcloud import SoundcloudSearchIE
-    from gallery_dl.extractor.tiktok import TiktokExtractor
+    if os.getenv("MEDIA_MUSIC_WORKER") != "1":
+        from yt_dlp.extractor.tiktok import TikTokIE
+        from gallery_dl.extractor.tiktok import TiktokExtractor
     return yt_dlp, ImpersonateTarget
 
 
