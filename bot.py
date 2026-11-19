@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from telegram import Bot, Chat, InputFile, InputMediaPhoto, InputMediaVideo, Message, MessageEntity
-from telegram import ReplyParameters, Update
+from telegram import ReplyParameters, Update, LinkPreviewOptions
 from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
@@ -32,9 +32,10 @@ from media import (Attachment, MediaError, Post, download_post, download_track,
 from settings import Settings
 from runtime import WebhookRuntime
 from music_engine import MusicEngine
+from cookie_help import COOKIE_HELP
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.19.33"
+BUILD = "2026.11.20.34"
 MUSIC_TIMEOUT = 45
 MUSIC_STATE = ContextVar("music_state", default=None)
 
@@ -179,6 +180,8 @@ class HealthHandler(BaseHTTPRequestHandler):
                 return
             payload = json.dumps({"result": HealthHandler.probe_result, "logs": HealthHandler.probe_logs,
                                   "allowed_chat_ids": sorted(self.media_bot.settings.chat_ids),
+                                  "owner_help_deliveries": self.media_bot.owner_help_deliveries,
+                                  "last_owner_help": self.media_bot.owner_help_last_delivery,
                                   "music_jobs": [{"stage": item["stage"],
                                                   "elapsed": round(time.monotonic() - item["started"], 1)}
                                                  for item in list(self.media_bot.active_music.values())]},
@@ -245,6 +248,8 @@ class MediaBot:
         self.media_cache = OrderedDict()
         self.music_engine = MusicEngine()
         self.active_music = {}
+        self.owner_help_deliveries = 0
+        self.owner_help_last_delivery = None
 
     async def start(self, app: Application) -> None:
         from downloader import warmup
@@ -281,6 +286,22 @@ class MediaBot:
         id_commands = {"/chatid", f"/chatid@{self.username.lower()}"}
         start_commands = {"/start", f"/start@{self.username.lower()}"}
 
+        if command.split("@", 1)[0] == "/cooki":
+            own_command = command in {"/cooki", f"/cooki@{self.username.lower()}"}
+            user_id = message.from_user.id if message.from_user else None
+            if (own_command and message.chat.type == Chat.PRIVATE
+                    and self.settings.owner_user_id is not None
+                    and user_id == self.settings.owner_user_id
+                    and message.chat_id == self.settings.owner_user_id):
+                sent = await self.send(lambda: context.bot.send_message(
+                    **self.destination(message), text=COOKIE_HELP, parse_mode="HTML",
+                    disable_notification=True,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)))
+                self.owner_help_deliveries += 1
+                if type(sent.message_id) is int:
+                    self.owner_help_last_delivery = {"message_id": sent.message_id, "update_id": update.update_id}
+            return
+
         if message.chat.type == Chat.PRIVATE:
             user_id = message.from_user.id if message.from_user else None
             if self.settings.owner_user_id is None and command in start_commands and user_id:
@@ -288,7 +309,7 @@ class MediaBot:
             if not user_id or user_id != self.settings.owner_user_id:
                 return
             if command in start_commands:
-                await self.say(context.bot, message, f"Пришли ссылку или напиши {self.trigger} Название трека.")
+                await self.say(context.bot, message, f"Пришли ссылку или напиши {self.trigger} Название трека.\n/cooki — как обновить cookies YouTube с телефона или ПК.")
                 return
         elif message.chat.type in (Chat.GROUP, Chat.SUPERGROUP):
             allowed = message.chat_id in self.settings.chat_ids

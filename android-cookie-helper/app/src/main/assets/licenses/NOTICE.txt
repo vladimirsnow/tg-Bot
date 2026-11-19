@@ -1,0 +1,8 @@
+YouTube Cookies uses GeckoView 160.0.20261116130455, copyright Mozilla contributors.
+GeckoView is available under Mozilla Public License 2.0; see MPL-2.0.txt.
+Corresponding Firefox 160.0 source distribution and third-party notices:
+https://archive.mozilla.org/pub/firefox/releases/160.0/source/
+https://firefox-source-docs.mozilla.org/
+
+The app source is available at https://github.com/vladimirsnow/tg-Bot/tree/main/android-cookie-helper
+The app is not affiliated with Google, YouTube, Mozilla or Render.

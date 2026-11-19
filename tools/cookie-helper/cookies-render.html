@@ -1,0 +1,43 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Cuq1gfcrfA5ZhrijSa95QmmJNv9W6FDCnzyAnv3JKWM='; style-src 'sha256-BmKCoJfp8deJRmOS/9Ofg2KdrGpifR8QdujARxrK1X8='; connect-src 'none'; base-uri 'none'; form-action 'none'"><title>Cookies YouTube для Render</title><style>body{font:17px system-ui,sans-serif;line-height:1.5;margin:0;background:#f4f6fa;color:#10243a}main{max-width:650px;margin:32px auto;padding:24px;background:white;border-radius:20px}h1{font-size:28px;margin-top:0}button,input{font:inherit}button{border:0;background:#1b62d1;color:white;padding:14px 18px;border-radius:10px;margin:8px 6px 0 0;cursor:pointer}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:3px solid #8ab8ff;outline-offset:3px}input{display:block;width:100%;padding:16px 0}small{display:block;margin-top:22px}#status{min-height:50px;background:#eef3fb;border-radius:12px;padding:14px}ol{padding-left:24px}@media(max-width:700px){main{margin:0;border-radius:0;padding:20px}button{width:100%;margin-right:0}}</style><main><h1>Cookies YouTube → Render</h1><p>Локальный конвертер. Работает без интернета и не загружает cookies на сервер.</p><ol><li>Экспортируй cookies YouTube в Netscape TXT и закрой отдельную сессию браузера.</li><li>Выбери файл здесь и скопируй значение.</li><li>В Render → Environment замени <strong>YOUTUBE_COOKIES_BASE64</strong> и нажми <strong>Save, rebuild, and deploy</strong>.</li></ol><label for="file">Файл cookies.txt</label><input id="file" type="file" accept=".txt,text/plain"><p id="status" role="status" aria-live="polite"></p><button id="copy" disabled>Копировать значение</button><button id="save" disabled>Скачать .env</button><button id="clear">Очистить</button><small>Cookies дают доступ к сессии. Не публикуй TXT, .env или скопированное значение и не отправляй их в Telegram.</small></main><script>/* Local Netscape -> Render conversion. No network or storage APIs. */
+function convertCookies(input, now = Math.floor(Date.now() / 1000)) {
+  if (new TextEncoder().encode(input).length > 131072) throw new Error("Файл больше 128 КБ.");
+  input = input.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  if (!/^# (?:Netscape HTTP Cookie File|HTTP Cookie File)/.test(input)) {
+    throw new Error("Нужен cookies.txt в формате Netscape.");
+  }
+  const allowed = new Set(["youtube.com", "www.youtube.com", "music.youtube.com"]);
+  const rows = new Map();
+  for (let line of input.split("\n")) {
+    if (!line.trim()) continue;
+    const httpOnly = line.startsWith("#HttpOnly_");
+    if (httpOnly) line = line.slice(10);
+    else if (line.startsWith("#")) continue;
+    const parts = line.split("\t");
+    if (parts.length !== 7 || parts.some(x => /[\r\n\0]/.test(x))) throw new Error("Повреждённая строка в cookies.txt.");
+    const [domain, sub, path, secure, expiry, name, value] = parts;
+    if (!allowed.has(domain.replace(/^\./, ""))) continue;
+    if (!["TRUE", "FALSE"].includes(sub) || !["TRUE", "FALSE"].includes(secure) || !path.startsWith("/") || !name) throw new Error("Неверный формат cookies YouTube.");
+    if (expiry && !/^\d+$/.test(expiry)) throw new Error("Неверный срок cookies.");
+    if (!value || (expiry && Number(expiry) > 0 && Number(expiry) <= now)) continue;
+    parts[4] = !expiry || expiry === "0" ? "" : expiry;
+    rows.set([domain, path, name].join("\t"), {name, line: (httpOnly ? "#HttpOnly_" : "") + parts.join("\t")});
+  }
+  const names = new Set([...rows.values()].map(x => x.name));
+  if (!["SID", "__Secure-1PSID", "__Secure-3PSID"].some(x => names.has(x)) || !["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"].some(x => names.has(x))) {
+    throw new Error("Нет действующей сессии YouTube. Войди и экспортируй новые cookies.");
+  }
+  const netscape = "# Netscape HTTP Cookie File\n# YouTube only; converted locally\n" + [...rows.entries()].sort(([a],[b]) => a.localeCompare(b)).map(([,v]) => v.line).join("\n") + "\n";
+  const bytes = new TextEncoder().encode(netscape);
+  const base64 = btoa(Array.from(bytes, x => String.fromCharCode(x)).join(""));
+  return {count: rows.size, netscape, base64, env: "YOUTUBE_COOKIES_BASE64=" + base64 + "\n"};
+}
+
+let result=null;
+const $=id=>document.getElementById(id);
+function reset(){result=null;$('file').value='';$('copy').disabled=$('save').disabled=true;$('status').textContent='Выбери cookies.txt. Содержимое не отправляется на сервер.';}
+$('file').addEventListener('change',async()=>{try{const file=$('file').files[0];if(!file)return;if(file.size>131072)throw new Error('Файл больше 128 КБ.');result=convertCookies(await file.text());$('status').textContent='Готово: '+result.count+' cookies YouTube. Остальные сайты исключены.';$('copy').disabled=$('save').disabled=false;}catch(e){result=null;$('copy').disabled=$('save').disabled=true;$('status').textContent=e.message;}});
+$('copy').addEventListener('click',async()=>{if(!result)return;try{await navigator.clipboard.writeText(result.base64);}catch{const box=document.createElement('textarea');box.value=result.base64;box.style.position='fixed';box.style.opacity='0';document.body.append(box);box.select();const ok=document.execCommand('copy');box.remove();if(!ok){$('status').textContent='Браузер не дал доступ к буферу. Скачай .env и импортируй его в Render.';return;}}$('status').textContent='Значение скопировано. Вставь его в YOUTUBE_COOKIES_BASE64 в Render → Environment.';});
+$('save').addEventListener('click',()=>{if(!result)return;const url=URL.createObjectURL(new Blob([result.env],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='render-youtube.env';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
+$('clear').addEventListener('click',reset);
+reset();
+</script></html>

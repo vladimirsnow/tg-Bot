@@ -7,3 +7,7 @@ cookies/
 .venv/
 __pycache__/
 *.py[cod]
+android-cookie-helper/
+tools/
+artifacts/
+tests/

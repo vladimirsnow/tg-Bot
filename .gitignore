@@ -7,3 +7,9 @@ cookies/
 .venv/
 __pycache__/
 *.py[cod]
+android-cookie-helper/.gradle/
+android-cookie-helper/**/build/
+android-cookie-helper/local.properties
+artifacts/
+*.jks
+*.keystore
