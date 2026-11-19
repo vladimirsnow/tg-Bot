@@ -34,7 +34,7 @@ from runtime import WebhookRuntime
 from music_engine import MusicEngine
 
 LOG = logging.getLogger(__name__)
-BUILD = "2026.11.17.29"
+BUILD = "2026.11.19.30"
 MUSIC_TIMEOUT = 40
 MUSIC_STATE = ContextVar("music_state", default=None)
 
@@ -249,10 +249,6 @@ class MediaBot:
     async def start(self, app: Application) -> None:
         from downloader import warmup
         await asyncio.to_thread(warmup)
-        try:
-            await self.music_engine.start()
-        except Exception as exc:
-            LOG.warning("Музыкальный процесс / запуск: %s", type(exc).__name__)
         HealthHandler.media_bot = self
         HealthHandler.loop = asyncio.get_running_loop()
         self.username = app.bot.username
@@ -437,7 +433,7 @@ class MediaBot:
                 result = await self.load(loader, source, directory)
             except (MediaError, OSError, ValueError) as exc:
                 LOG.info("%s / %s", type(source).__name__, error_detail(exc))
-                if job.link and job.link.platform == "youtube" and str(exc).startswith("YouTube не разрешил"):
+                if job.link and job.link.platform == "youtube" and str(exc).startswith(("YouTube не разрешил", "YouTube:")):
                     failure = str(exc)
                 await self.finish_status(bot, job.message, status, failure)
                 return False

@@ -1,4 +1,4 @@
-"""A killable music downloader, independent of the Telegram event loop."""
+"""A killable music downloader that releases memory after each job."""
 import asyncio
 import json
 import logging
@@ -78,11 +78,7 @@ class MusicEngine:
                 if item.get("path"):
                     item["path"] = Path(item["path"])
                 return Attachment(**item)
-            except MediaError:
+            finally:
+                # Release imported extractors and stop losing provider threads,
+                # including their FFmpeg/Deno children, before the next job.
                 await self.abort()
-                raise
-            except BaseException:
-                # Killing the whole process group also stops FFmpeg/Deno and
-                # hung provider threads before the temporary directory is removed.
-                await self.abort()
-                raise

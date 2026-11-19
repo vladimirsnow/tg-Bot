@@ -19,12 +19,28 @@ from bot import Job, MediaBot, HealthHandler
 from links import parse_link
 from media import Attachment, MediaError, Post, gallery, recover_post, load_post, download_post, Remote, ytdlp
 from settings import Settings
+from downloader import DownloadFailure, extract
 
 
 SETTINGS = Settings("", "", frozenset(), 123, None, None)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_expired_youtube_session_is_not_reported_as_missing_video(self):
+        def fail(url, download=False):
+            backend.call_args.args[0]["logger"].warning("The provided YouTube account cookies are no longer valid.")
+            raise ValueError("Requested format is not available")
+        with patch("yt_dlp.YoutubeDL") as backend:
+            backend.return_value.__enter__.return_value.extract_info.side_effect = fail
+            with self.assertRaises(DownloadFailure) as failure:
+                extract("https://youtube.com/watch?v=test")
+            self.assertEqual(failure.exception.reason, "youtube_cookies_expired")
+
+    def test_js_process_failure_does_not_ask_for_another_account(self):
+        with tempfile.TemporaryDirectory() as temp, patch("downloader.extract", side_effect=DownloadFailure("javascript_process_killed")):
+            with self.assertRaisesRegex(MediaError, "принудительно остановлен"):
+                ytdlp("https://youtube.com/watch?v=test", Path(temp), None)
+
     def test_project_groups_are_merged_with_environment_groups(self):
         values = {"TELEGRAM_BOT_TOKEN": "123:" + "a" * 24, "ALLOWED_CHAT_IDS": "-1005"}
         with patch("settings.load_dotenv"), patch.dict(os.environ, values, clear=True):

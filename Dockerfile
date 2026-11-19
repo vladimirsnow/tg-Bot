@@ -2,7 +2,8 @@ FROM denoland/deno:latest AS deno
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    DENO_NO_UPDATE_CHECK=1 DENO_NO_PROMPT=1
+    DENO_NO_UPDATE_CHECK=1 DENO_NO_PROMPT=1 \
+    DENO_V8_FLAGS=--max-old-space-size=256,--max-semi-space-size=8
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/* \

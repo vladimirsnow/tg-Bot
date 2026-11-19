@@ -77,6 +77,23 @@ class MusicTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(engine.process)
         self.assertIsNotNone(process.returncode)
 
+    async def test_successful_download_releases_process_and_can_start_again(self):
+        engine = MusicEngine()
+        child = "import sys,json,time; sys.stdin.readline(); print(json.dumps({'attachment': {'kind': 'audio', 'path': '/tmp/track.mp3', 'title': 'Song'}}), flush=True); time.sleep(300)"
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", child, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        engine.process = process
+        try:
+            result = await engine.request("search", "Song", Path("/tmp"), SETTINGS)
+            self.assertEqual(result.title, "Song")
+            self.assertIsNone(engine.process)
+            self.assertIsNotNone(process.returncode)
+            await engine.start()
+            self.assertIsNone(engine.process.returncode)
+        finally:
+            await engine.abort()
+
     async def test_whole_music_job_times_out_and_clears_progress(self):
         worker = MediaBot(SETTINGS)
 

@@ -356,7 +356,7 @@ def twitter(client: httpx.Client, link: Link) -> list[Remote]:
 
 def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
           timeout: int = 90, native_info: dict | None = None, cancel_event=None) -> Attachment:
-    from downloader import extract, warmup
+    from downloader import DownloadFailure, extract, warmup
     _, target_type = warmup()
     options = {"outtmpl": str(directory / "download.%(ext)s"),
                "max_filesize": SOURCE_LIMIT, "windowsfilenames": True,
@@ -387,6 +387,10 @@ def ytdlp(url: str, directory: Path, cookies: Path | None, audio: bool = False,
     try:
         info = extract(url, options, download=True, timeout=timeout, tiktok_data=native_info,
                        cancel_event=cancel_event)
+    except DownloadFailure as exc:
+        if exc.reason == "youtube_cookies_expired":
+            raise MediaError("YouTube: сохранённая сессия аккаунта больше недействительна. Владельцу нужно обновить cookies в настройках бота.") from None
+        raise MediaError("YouTube: процесс обработки защиты видео был принудительно остановлен. Попробуй позже.") from None
     except Exception as exc:
         hint = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", str(exc))
         raise MediaError(f"yt-dlp: {hint[:340]}") from None

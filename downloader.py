@@ -8,6 +8,12 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 
+class DownloadFailure(RuntimeError):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
 def warmup():
     import yt_dlp
     from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -23,6 +29,7 @@ class QuietLogger:
         self.started = time.monotonic()
         self.deadline = deadline
         self.cancel_event = cancel_event
+        self.failure_reason = None
 
     def guard(self):
         if time.monotonic() > self.deadline or (self.cancel_event and self.cancel_event.is_set()):
@@ -36,6 +43,10 @@ class QuietLogger:
 
     def warning(self, message):
         self.guard()
+        if "cookies are no longer valid" in message:
+            self.failure_reason = "youtube_cookies_expired"
+        elif "returncode: -9" in message and not self.failure_reason:
+            self.failure_reason = "javascript_process_killed"
         safe = re.sub(r"https?://\S+|\d+:[A-Za-z0-9_-]{20,}", "<hidden>", message)
         LOG.info("Загрузчик / %s", safe[:350])
 
@@ -76,16 +87,21 @@ def extract(url, options=None, download=False, timeout=60, tiktok_data=None, can
             "innertube_host": ["youtubei.googleapis.com"],
         }}
     with yt_dlp.YoutubeDL(params) as ydl:
-        if tiktok_data:
-            from yt_dlp.extractor.tiktok import TikTokIE
-            for cookie in tiktok_data.get("__tiktok_cookies", ()):
-                ydl.cookiejar.set_cookie(cookie)
-            author = (tiktok_data.get("author") or {}).get("uniqueId") or tiktok_data.get("user")
-            canonical = f"https://www.tiktok.com/@{author}/video/{tiktok_data['id']}" if author else url
-            parsed = TikTokIE(ydl)._parse_aweme_video_web(tiktok_data, canonical, str(tiktok_data["id"]))
-            info = ydl.process_ie_result(parsed, download=download)
-        else:
-            info = ydl.extract_info(url, download=download)
+        try:
+            if tiktok_data:
+                from yt_dlp.extractor.tiktok import TikTokIE
+                for cookie in tiktok_data.get("__tiktok_cookies", ()):
+                    ydl.cookiejar.set_cookie(cookie)
+                author = (tiktok_data.get("author") or {}).get("uniqueId") or tiktok_data.get("user")
+                canonical = f"https://www.tiktok.com/@{author}/video/{tiktok_data['id']}" if author else url
+                parsed = TikTokIE(ydl)._parse_aweme_video_web(tiktok_data, canonical, str(tiktok_data["id"]))
+                info = ydl.process_ie_result(parsed, download=download)
+            else:
+                info = ydl.extract_info(url, download=download)
+        except Exception:
+            if logger.failure_reason:
+                raise DownloadFailure(logger.failure_reason) from None
+            raise
         logger.guard()
         if not info:
             raise ValueError("No media returned")
